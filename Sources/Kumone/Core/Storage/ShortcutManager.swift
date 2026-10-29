@@ -7,6 +7,10 @@ public struct UserShortcut: Codable, Equatable {
     public var key: String
     public var modifiers: ShortcutModifiers
 
+    var normalized: UserShortcut {
+        UserShortcut(key: key.lowercased(), modifiers: modifiers)
+    }
+
     public struct ShortcutModifiers: OptionSet, Codable, Equatable {
         public let rawValue: Int
         public init(rawValue: Int) { self.rawValue = rawValue }
@@ -47,6 +51,12 @@ public struct UserShortcut: Codable, Equatable {
     public var keyboardShortcut: KeyboardShortcut? {
         guard !key.isEmpty else { return nil }
         return KeyboardShortcut(KeyEquivalent(Character(key)), modifiers: modifiers.eventModifiers)
+    }
+
+    var menuShortcut: KeyboardShortcut? {
+        // Bare menu equivalents also fire in text fields, bypassing our input guard.
+        guard modifiers.contains(.command) || modifiers.contains(.control) else { return nil }
+        return keyboardShortcut
     }
 
     public var displayString: String {
@@ -95,6 +105,9 @@ public enum ShortcutAction: String, Codable, CaseIterable, Identifiable, Hashabl
     case closeImmersive
     case volumeUp
     case volumeDown
+    case searchPlaylist, searchLibrary
+    case toggleNowPlaying, toggleMute, seekBackward, seekForward, toggleDesktopLyrics
+    case selectPreviousRow, selectNextRow, playSelectedRow
 
     public var id: String { rawValue }
 
@@ -110,6 +123,16 @@ public enum ShortcutAction: String, Codable, CaseIterable, Identifiable, Hashabl
         case .closeImmersive: return String(localized: "关闭面板 / 播放页")
         case .volumeUp: return String(localized: "增加音量")
         case .volumeDown: return String(localized: "减少音量")
+        case .searchPlaylist: return String(localized: "搜索歌单内歌曲")
+        case .searchLibrary: return String(localized: "全局搜索")
+        case .toggleNowPlaying: return String(localized: "打开 / 收起播放页")
+        case .toggleMute: return String(localized: "静音 / 恢复音量")
+        case .seekBackward: return String(localized: "后退 5 秒")
+        case .seekForward: return String(localized: "前进 5 秒")
+        case .toggleDesktopLyrics: return String(localized: "桌面歌词")
+        case .selectPreviousRow: return String(localized: "选择上一首歌曲")
+        case .selectNextRow: return String(localized: "选择下一首歌曲")
+        case .playSelectedRow: return String(localized: "播放选中歌曲")
         }
     }
 
@@ -126,6 +149,16 @@ public enum ShortcutAction: String, Codable, CaseIterable, Identifiable, Hashabl
         case .closeImmersive: return UserShortcut(key: "\u{1B}", modifiers: [])
         case .volumeUp: return UserShortcut(key: "=", modifiers: [])
         case .volumeDown: return UserShortcut(key: "-", modifiers: [])
+        case .searchPlaylist: return UserShortcut(key: "f", modifiers: [])
+        case .searchLibrary: return UserShortcut(key: "f", modifiers: .shift)
+        case .toggleNowPlaying: return UserShortcut(key: "p", modifiers: [])
+        case .toggleMute: return UserShortcut(key: "m", modifiers: [])
+        case .seekBackward: return UserShortcut(key: "\u{F702}", modifiers: [])
+        case .seekForward: return UserShortcut(key: "\u{F703}", modifiers: [])
+        case .toggleDesktopLyrics: return UserShortcut(key: "y", modifiers: .shift)
+        case .selectPreviousRow: return UserShortcut(key: "\u{F700}", modifiers: [])
+        case .selectNextRow: return UserShortcut(key: "\u{F701}", modifiers: [])
+        case .playSelectedRow: return UserShortcut(key: "\r", modifiers: [])
         }
     }
 }
@@ -182,7 +215,7 @@ final class ShortcutManager: ObservableObject {
     private func loadShortcuts() {
         do {
             if let data = userDefaults.data(forKey: Self.bindingsKey) {
-                bindings = try JSONDecoder().decode(ShortcutBindings.self, from: data)
+                bindings = completing(try JSONDecoder().decode(ShortcutBindings.self, from: data))
             } else {
                 var migrated = ShortcutBindings.defaults
                 for action in ShortcutAction.allCases {
@@ -190,6 +223,7 @@ final class ShortcutManager: ObservableObject {
                         migrated.app[action] = try JSONDecoder().decode(UserShortcut.self, from: data)
                     }
                 }
+                migrated = completing(migrated)
                 let data = try JSONEncoder().encode(migrated)
                 userDefaults.set(data, forKey: Self.bindingsKey)
                 bindings = migrated
@@ -205,6 +239,10 @@ final class ShortcutManager: ObservableObject {
     }
 
     func setShortcut(_ shortcut: UserShortcut, for action: ShortcutAction) throws {
+        let shortcut = shortcut.normalized
+        if let conflict = conflictDescription(for: shortcut, excluding: action) {
+            throw ShortcutConflict(message: conflict)
+        }
         guard shortcut != self.shortcut(for: action) else { return }
         var updated = bindings
         updated.app[action] = shortcut
@@ -228,35 +266,98 @@ final class ShortcutManager: ObservableObject {
         appShortcuts[action] ?? action.defaultShortcut
     }
 
+    private struct ShortcutConflict: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    func conflictDescription(for shortcut: UserShortcut, excluding action: ShortcutAction) -> String? {
+        let shortcut = shortcut.normalized
+        guard !shortcut.key.isEmpty else { return nil }
+        if let other = ShortcutAction.allCases.first(where: {
+            $0 != action && self.shortcut(for: $0).normalized == shortcut
+        }) {
+            return String(localized: "已用于「\(other.displayName)」，请换一个按键。")
+        }
+        if shortcut.modifiers == .command {
+            // Native editing, window and navigation commands must remain reachable.
+            let reserved = ["a", "c", "v", "x", "z", "q", "w", "h", "m", ",", "[", "]", " ", "\t"]
+            if reserved.contains(shortcut.key) || Int(shortcut.key).map({ (1...9).contains($0) }) == true {
+                return String(localized: "此组合键用于系统或页面操作，请换一个按键。")
+            }
+        }
+        if shortcut.modifiers == [.command, .shift], ["z", "3", "4", "5", "\t"].contains(shortcut.key) {
+            return String(localized: "此组合键用于系统或页面操作，请换一个按键。")
+        }
+        if shortcut.modifiers == [.command, .control], shortcut.key == "f" {
+            return String(localized: "此组合键用于系统或页面操作，请换一个按键。")
+        }
+        return nil
+    }
+
+    private func completing(_ stored: ShortcutBindings) -> ShortcutBindings {
+        var result = stored
+        for action in ShortcutAction.allCases {
+            if let shortcut = result.app[action] { result.app[action] = shortcut.normalized }
+        }
+        // Keep explicit clears and custom keys. A newly added default must not
+        // steal a key that an existing installation already assigned elsewhere.
+        for action in ShortcutAction.allCases where result.app[action] == nil {
+            let proposed = action.defaultShortcut
+            result.app[action] = result.app.values.contains(proposed) ? .unassigned : proposed
+        }
+        return result
+    }
+
     // MARK: - App-internal Key Event Matching (local monitor only)
 
     func handleKeyEvent(_ event: NSEvent) -> Bool {
         let currentModifiers = UserShortcut.ShortcutModifiers(nsFlags: event.modifierFlags)
 
         // We handle some keys only if not editing text
-        let editingText = NSApp.keyWindow?.firstResponder is NSText
-            || NSApp.keyWindow?.firstResponder is NSTextView
+        let editingText = event.window?.firstResponder is NSText
 
         // Match against registered app shortcuts only
-        for (action, shortcut) in appShortcuts where !shortcut.key.isEmpty {
+        for action in ShortcutAction.allCases {
+            let shortcut = self.shortcut(for: action)
+            guard !shortcut.key.isEmpty else { continue }
             if editingText {
                 if shortcut.modifiers.isEmpty || (!shortcut.modifiers.contains(.command) && !shortcut.modifiers.contains(.control)) {
                     continue
                 }
             }
 
-            if event.charactersIgnoringModifiers == shortcut.key && currentModifiers == shortcut.modifiers {
-                executeAction(action)
-                return true
+            if event.charactersIgnoringModifiers?.lowercased() == shortcut.key && currentModifiers == shortcut.modifiers {
+                return executeAction(action, in: event.window)
             }
         }
 
         return false
     }
 
-    func executeAction(_ action: ShortcutAction) {
+    @discardableResult
+    func executeAction(_ action: ShortcutAction, in window: NSWindow? = nil) -> Bool {
+        let window = window ?? NSApp.keyWindow
+        let player = PlayerService.shared
+        switch action {
+        case .searchLibrary:
+            guard window === AppDelegate.shared?.mainWindow, window != nil, window?.attachedSheet == nil else { return false }
+            player.showNowPlaying = false
+            NotificationCenter.default.post(name: .focusLibrarySearch, object: window)
+            return true
+        case .searchPlaylist, .selectPreviousRow, .selectNextRow, .playSelectedRow:
+            guard !player.showNowPlaying, window?.attachedSheet == nil,
+                  let table = window?.contentView?.descendant(of: TrackTable.SongTable.self,
+                      matching: { !$0.isHiddenOrHasHiddenAncestor && !$0.visibleRect.isEmpty }) else { return false }
+            switch action {
+            case .searchPlaylist: return table.focusSearch?() == true
+            case .selectPreviousRow: return table.moveSelection?(false) == true
+            case .selectNextRow: return table.moveSelection?(true) == true
+            default: return table.activateSelection?() == true
+            }
+        default: break
+        }
         Task { @MainActor in
-            let player = PlayerService.shared
             switch action {
             case .togglePlayPause:
                 player.togglePlayPause()
@@ -280,7 +381,20 @@ final class ShortcutManager: ObservableObject {
                 player.volume = min(player.volume + 0.1, 1.0)
             case .volumeDown:
                 player.volume = max(player.volume - 0.1, 0.0)
+            case .toggleNowPlaying:
+                guard player.hasCurrentTrack else { return }
+                withAnimation(AppAnimation.smooth) { player.showNowPlaying.toggle() }
+            case .toggleMute:
+                player.toggleMute()
+            case .seekBackward, .seekForward:
+                guard player.hasCurrentTrack, player.duration > 0 else { return }
+                player.seek(to: min(player.duration, max(0, player.progress + (action == .seekForward ? 5 : -5))))
+            case .toggleDesktopLyrics:
+                SettingsManager.shared.showDesktopLyrics.toggle()
+            case .searchLibrary, .searchPlaylist, .selectPreviousRow, .selectNextRow, .playSelectedRow:
+                break // Contextual actions are delivered synchronously above.
             }
         }
+        return true
     }
 }

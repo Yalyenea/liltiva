@@ -52,7 +52,19 @@ struct MainWindow: View {
 
     private var navigationActions: NavigationActions {
         NavigationActions(canGoBack: history.canGoBack, canGoForward: history.canGoForward,
-            back: { navigateHistory(forward: false) }, forward: { navigateHistory(forward: true) })
+            back: { navigateHistory(forward: false) }, forward: { navigateHistory(forward: true) },
+            canSearchPlaylist: canSearchPlaylist)
+    }
+
+    private var canSearchPlaylist: Bool {
+        guard !player.showNowPlaying else { return false }
+        if let destination = path.last {
+            switch destination {
+            case .playlist, .radarPlaylist: return true
+            default: return false
+            }
+        }
+        return selection == .likedSongs && account.likedSongsPlaylist != nil
     }
 
     private func navigateHistory(forward: Bool) {
@@ -295,15 +307,13 @@ struct MainWindow: View {
         case .recents:
             RecentsView()
         case .collections:
-            CollectionsView()
+            if account.hasAuthCookie {
+                CollectionsView()
+            } else {
+                loginPrompt("登录后查看你的收藏")
+            }
         case .cloud:
             CloudView()
-        case .saved:
-            if account.hasAuthCookie {
-                SavedPlaylistsView()
-            } else {
-                loginPrompt("登录后查看你收藏的歌单")
-            }
         }
     }
 

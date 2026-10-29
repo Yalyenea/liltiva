@@ -117,14 +117,29 @@ final class PlayerService: ObservableObject {
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var servedQuality: String?
     @Published private(set) var isTrial = false
-    @Published private(set) var aiSoundEffectState: AISoundEffectState = .off
-    private var aiSoundEffect: AISoundEffect?
+    @Published private(set) var soundEffectState: SoundEffectState = .off
+    @Published private(set) var soundEffectPresets: [SoundEffectPreset] = []
+    @Published private(set) var soundEffectCatalogLoading = false
+    @Published private(set) var soundEffectCatalogFailed = false
+    @Published private(set) var closedTuningPreferences: [AITuningPreference: String] = [:]
+    var soundEffectEmotionLabel: String? {
+        guard SettingsManager.shared.soundEffectMode == .emotion,
+              let labels = activeSoundEffect?.feature?["emotion_label"].stringValue else { return nil }
+        return labels.split(separator: ",").map(String.init)
+            .filter { !["正向情绪", "中性情绪", "负面情绪"].contains($0) }.prefix(3).joined(separator: "、")
+    }
+    private var catalogAccountID: Int?
+    private var catalogTask: Task<Void, Never>?
+    private var activeSoundEffect: AISoundEffect?
     private var soundEffectTask: Task<Void, Never>?
     private var soundEffectObservation: AnyCancellable?
     private struct SoundEffectContext: Equatable {
         let session: String
         let songID: Int
         let quality: AudioQuality
+        let mode: SoundEffectMode
+        let presetID: Int
+        let preferences: Set<AITuningPreference>
     }
     private var soundEffectContext: SoundEffectContext?
     let clock = PlaybackClock()
@@ -143,8 +158,21 @@ final class PlayerService: ObservableObject {
     var shuffleEnabled: Bool { queueOrder == .shuffled }
     @Published var volume: Float = 1 {
         didSet {
+            if volume > 0 { volumeBeforeMute = volume }
             engine.outputVolume = volume
             UserDefaults.standard.set(volume, forKey: "player.volume")
+        }
+    }
+
+    private var volumeBeforeMute: Float = 1
+
+    func toggleMute() {
+        if volume > 0 {
+            // Capture the startup value too; property observers do not run in init.
+            volumeBeforeMute = volume
+            volume = 0
+        } else {
+            volume = volumeBeforeMute
         }
     }
 
@@ -274,9 +302,9 @@ final class PlayerService: ObservableObject {
         let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if self.aiSoundEffect != nil, AccountStore.shared.membershipTier != .svip {
-                    self.resetAISoundEffect()
-                    self.aiSoundEffectState = .requiresSVIP
+                if self.activeSoundEffect != nil, !self.soundEffectMembershipAllowed {
+                    self.resetSoundEffect()
+                    self.soundEffectState = .unauthorized
                 }
                 guard self.isPlaying, self.sourceLoaded, !self.isScrubbing else { return }
                 let seconds = self.engine.position
@@ -318,7 +346,7 @@ final class PlayerService: ObservableObject {
             guard let self else { return }
             let cameOnline = self.usesOfflineQueue && network.connected
             self.networkState = network
-            if cameOnline, self.aiSoundEffectState == .offlineMissing { self.refreshAISoundEffect(retry: true) }
+            if cameOnline, self.soundEffectState == .offlineMissing { self.refreshSoundEffect(retry: true) }
         }
         restoreState()
         // A saved list-repeat selection becomes ordinary ordered playback.
@@ -329,7 +357,7 @@ final class PlayerService: ObservableObject {
             .combineLatest(account.$profile.map { $0?.userId }.removeDuplicates())
             // AccountStore's @Published values emit before their stored values change.
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.refreshAISoundEffect() }
+            .sink { [weak self] _ in self?.refreshSoundEffect() }
     }
 
     /// Set while the user drags the seek bar so the time observer doesn't fight the thumb.
@@ -425,87 +453,181 @@ final class PlayerService: ObservableObject {
         pendingQualityReload = continuingCurrentTrack
     }
 
-    func setAISoundEffectEnabled(_ enabled: Bool) {
-        guard !enabled || AccountStore.shared.membershipTier == .svip else { return }
+    func setSoundEffectMode(_ mode: SoundEffectMode) {
+        guard mode.minimumMembership <= AccountStore.shared.membershipTier else { return }
         let settings = SettingsManager.shared
-        guard settings.aiSoundEffectEnabled != enabled else { return }
-        settings.aiSoundEffectEnabled = enabled
-        resetAISoundEffect()
+        guard settings.soundEffectMode != mode else { return }
         let quality = servedQuality.flatMap(AudioQuality.init) ?? AccountStore.shared.playbackQuality
-        if quality.usesNativePlayback, !quality.isSpatial, let track = currentTrack {
-            // Switching between AVPlayer and EQ processing needs a source reload;
-            // preserve the listening checkpoint and the user's paused intent.
+        let wasProcessing = wantsSoundEffect(for: quality)
+        settings.soundEffectMode = mode
+        resetSoundEffect()
+        if quality.usesNativePlayback, !quality.isSpatial, wasProcessing != wantsSoundEffect(for: quality),
+           let track = currentTrack {
+            // Native high-resolution playback and the local DSP require different
+            // sources. Preserve both the checkpoint and the user's paused intent.
             startPlaying(track, resumeAt: livePlaybackTime, continuingCurrentTrack: true, autoplay: isPlaying)
         } else {
-            refreshAISoundEffect()
+            refreshSoundEffect()
         }
+    }
+
+    func selectSoundEffectPreset(_ preset: SoundEffectPreset) {
+        guard preset.canUse(tier: AccountStore.shared.membershipTier) else { return }
+        let settings = SettingsManager.shared
+        guard settings.soundEffectPresetID != preset.id || settings.soundEffectMode != .preset else { return }
+        settings.soundEffectPresetID = preset.id
+        if settings.soundEffectMode == .preset { refreshSoundEffect() }
+        else { setSoundEffectMode(.preset) }
+    }
+
+    func setAITuningPreference(_ preference: AITuningPreference, enabled: Bool) {
+        var selected = SettingsManager.shared.aiTuningPreferences
+        if enabled { selected.insert(preference) } else { selected.remove(preference) }
+        SettingsManager.shared.aiTuningPreferences = selected
+        if SettingsManager.shared.soundEffectMode == .aiMaster { refreshSoundEffect() }
+    }
+
+    func resetAITuningPreferences() {
+        SettingsManager.shared.aiTuningPreferences = []
+        setAISoundEffectStrength(1)
+        if SettingsManager.shared.soundEffectMode == .aiMaster { refreshSoundEffect() }
     }
 
     func setAISoundEffectStrength(_ strength: Double) {
         guard strength.isFinite else { return }
         let value = min(1, max(0, strength))
         SettingsManager.shared.aiSoundEffectStrength = value
-        engine.setSoundEffect(aiSoundEffect, strength: value)
+        engine.setSoundEffect(activeSoundEffect, strength: SettingsManager.shared.soundEffectMode == .aiMaster ? value : 1)
     }
 
-    private func wantsAISoundEffect(for quality: AudioQuality) -> Bool {
-        SettingsManager.shared.aiSoundEffectEnabled
-            && AccountStore.shared.membershipTier == .svip && !quality.isSpatial && !isTrial
+    private var soundEffectMembershipAllowed: Bool {
+        let mode = SettingsManager.shared.soundEffectMode
+        guard mode != .off, mode.minimumMembership <= AccountStore.shared.membershipTier else { return false }
+        if mode == .preset {
+            return soundEffectPresets.first(where: { $0.id == SettingsManager.shared.soundEffectPresetID })?
+                .canUse(tier: AccountStore.shared.membershipTier) == true
+        }
+        return true
     }
 
-    private func resetAISoundEffect() {
+    private func wantsSoundEffect(for quality: AudioQuality) -> Bool {
+        let mode = SettingsManager.shared.soundEffectMode
+        return mode != .off && mode.minimumMembership <= AccountStore.shared.membershipTier && !quality.isSpatial && !isTrial
+    }
+
+    func loadSoundEffectCatalog(refresh: Bool = false) {
+        let account = AccountStore.shared
+        let uid = account.authenticatedAccountID
+        if catalogAccountID != uid {
+            catalogTask?.cancel()
+            catalogTask = nil
+            soundEffectPresets = []
+            soundEffectCatalogFailed = false
+            soundEffectCatalogLoading = false
+            catalogAccountID = uid
+        }
+        guard let uid, let session = account.socialSession else { return }
+        guard refresh || (soundEffectPresets.isEmpty && !soundEffectCatalogLoading) else { return }
+        catalogTask?.cancel()
+        soundEffectCatalogLoading = true
+        soundEffectCatalogFailed = false
+        let offline = usesOfflineQueue
+        catalogTask = Task { [weak self] in
+            do {
+                let values = try await SoundEffectStore.shared.catalog(accountID: uid, offline: offline, refresh: refresh)
+                guard let self, !Task.isCancelled, account.socialSession == session else { return }
+                self.soundEffectPresets = values
+                self.soundEffectCatalogLoading = false
+                self.soundEffectCatalogFailed = values.isEmpty
+            } catch {
+                guard let self, !Task.isCancelled, account.socialSession == session else { return }
+                self.soundEffectCatalogLoading = false
+                self.soundEffectCatalogFailed = true
+            }
+        }
+    }
+
+    private func resetSoundEffect() {
         soundEffectTask?.cancel()
         soundEffectTask = nil
         soundEffectContext = nil
-        aiSoundEffect = nil
+        activeSoundEffect = nil
+        closedTuningPreferences = [:]
         engine.setSoundEffect(nil)
-        aiSoundEffectState = SettingsManager.shared.aiSoundEffectEnabled ? .waiting : .off
+        soundEffectState = SettingsManager.shared.soundEffectMode == .off ? .off : .waiting
     }
 
-    func refreshAISoundEffect(retry: Bool = false) {
+    func refreshSoundEffect(retry: Bool = false) {
         let account = AccountStore.shared
         let settings = SettingsManager.shared
-        guard settings.aiSoundEffectEnabled else { resetAISoundEffect(); return }
-        guard account.membershipTier == .svip, let uid = account.authenticatedAccountID,
-              let session = account.socialSession else {
-            resetAISoundEffect()
-            aiSoundEffectState = .requiresSVIP
+        loadSoundEffectCatalog()
+        let mode = settings.soundEffectMode
+        guard mode != .off else { resetSoundEffect(); return }
+        guard let uid = account.authenticatedAccountID, let session = account.socialSession else {
+            resetSoundEffect(); soundEffectState = .requiresLogin; return
+        }
+        guard account.membershipTier >= mode.minimumMembership else {
+            resetSoundEffect()
+            soundEffectState = mode == .aiMaster ? .requiresSVIP : .unauthorized
             return
         }
         guard let track = currentTrack, uid == playbackAccountID, sourceLoaded else {
-            resetAISoundEffect()
-            return
+            resetSoundEffect(); return
         }
         let quality = servedQuality.flatMap(AudioQuality.init) ?? account.playbackQuality
         guard !quality.isSpatial else {
-            resetAISoundEffect()
-            aiSoundEffectState = .unsupportedSource
-            return
+            resetSoundEffect(); soundEffectState = .unsupportedSource; return
         }
-        guard !isTrial else { resetAISoundEffect(); aiSoundEffectState = .unavailable; return }
-        let context = SoundEffectContext(session: session, songID: track.id, quality: quality)
+        guard !isTrial else { resetSoundEffect(); soundEffectState = .unavailable; return }
+        let context = SoundEffectContext(session: session, songID: track.id, quality: quality, mode: mode,
+                                         presetID: settings.soundEffectPresetID, preferences: settings.aiTuningPreferences)
         guard retry || soundEffectContext != context else { return }
-        resetAISoundEffect()
+        resetSoundEffect()
         soundEffectContext = context
-        aiSoundEffectState = .loading
+        soundEffectState = .loading
         let offline = usesOfflineQueue
         soundEffectTask = Task { [weak self] in
             do {
-                let effect = try await AISoundEffectStore.shared.effect(songID: track.id, accountID: uid,
-                                                                       offline: offline, refresh: retry)
+                let effect: AISoundEffect?
+                var closed: [AITuningPreference: String] = [:]
+                if mode == .aiMaster {
+                    let song = try await AISoundEffectStore.shared.effect(songID: track.id, accountID: uid,
+                                                                         offline: offline, refresh: retry)
+                    if let song, !context.preferences.isEmpty {
+                        let materials = try await SoundEffectStore.shared.tuningMaterials(offline: offline)
+                        let composed = try AITuningComposer.compose(song: song, preferences: context.preferences, materials: materials)
+                        effect = composed.effect
+                        closed = composed.closed
+                    } else { effect = song }
+                } else {
+                    effect = try await SoundEffectStore.shared.effect(mode: mode, presetID: context.presetID,
+                        songID: track.id, accountID: uid, tier: account.membershipTier, offline: offline, refresh: retry)
+                }
                 guard let self, !Task.isCancelled, self.soundEffectContext == context,
-                      account.socialSession == session, account.membershipTier == .svip,
-                      settings.aiSoundEffectEnabled else { return }
-                guard let effect, effect.aev2.eq.on else {
-                    self.aiSoundEffectState = offline ? .offlineMissing : .unavailable
+                      account.socialSession == session, account.membershipTier >= mode.minimumMembership,
+                      settings.soundEffectMode == mode else { return }
+                guard let effect else {
+                    self.soundEffectState = offline ? .offlineMissing : .unavailable
                     return
                 }
-                self.aiSoundEffect = effect
-                self.engine.setSoundEffect(effect, strength: settings.aiSoundEffectStrength)
-                self.aiSoundEffectState = .ready
+                // A preset's entitlement can expire while the request is in flight.
+                if mode == .preset {
+                    let list = try await SoundEffectStore.shared.catalog(accountID: uid, offline: offline)
+                    guard !Task.isCancelled, self.soundEffectContext == context, account.socialSession == session else { return }
+                    self.soundEffectPresets = list
+                    guard self.soundEffectMembershipAllowed else { self.soundEffectState = .unauthorized; return }
+                }
+                self.activeSoundEffect = effect
+                self.closedTuningPreferences = closed
+                self.engine.setSoundEffect(effect, strength: mode == .aiMaster ? settings.aiSoundEffectStrength : 1)
+                self.soundEffectState = .ready
             } catch {
                 guard let self, !Task.isCancelled, self.soundEffectContext == context else { return }
-                self.aiSoundEffectState = .failed
+                switch error {
+                case SoundEffectError.unauthorized: self.soundEffectState = .unauthorized
+                case SoundEffectError.offlineMissing: self.soundEffectState = .offlineMissing
+                default: self.soundEffectState = .failed
+                }
             }
         }
     }
@@ -814,7 +936,7 @@ final class PlayerService: ObservableObject {
                               localLease: OfflinePlaybackLease? = nil, resumeAt: TimeInterval = 0,
                               continuingCurrentTrack: Bool = false, autoplay: Bool = true) {
         pendingQualityReload = continuingCurrentTrack
-        resetAISoundEffect()
+        resetSoundEffect()
         offlineScan?.cancel()
         offlineScan = nil
         offlineScanID = UUID()
@@ -972,7 +1094,7 @@ final class PlayerService: ObservableObject {
         if let quality = AudioQuality(rawValue: resolved.level ?? key.level), quality.usesNativePlayback {
             let cached = resolved.isTrial ? nil : await EngineAudioCache.shared.cachedFileURL(for: key)
             guard generation == resolveGeneration else { return }
-            if wantsAISoundEffect(for: quality) {
+            if wantsSoundEffect(for: quality) {
                 isBuffering = true
                 do {
                     let local: URL
@@ -1065,7 +1187,7 @@ final class PlayerService: ObservableObject {
                 pendingQualityReload = false
                 duration = fileDuration
                 NowPlayingManager.shared.updateMetadata(for: track, duration: fileDuration)
-                refreshAISoundEffect()
+                refreshSoundEffect()
                 schedulePrefetch()
                 return
             }
@@ -1094,7 +1216,7 @@ final class PlayerService: ObservableObject {
             enginePaused = false
         }
         pendingQualityReload = false
-        refreshAISoundEffect()
+        refreshSoundEffect()
 
         if let time = resolved.durationMS, time > 0 {
             duration = TimeInterval(time) / 1000
@@ -1125,7 +1247,7 @@ final class PlayerService: ObservableObject {
         }
         AudioSpectrum.shared.reset()
         NowPlayingManager.shared.updateMetadata(for: track, duration: sourceDuration)
-        refreshAISoundEffect()
+        refreshSoundEffect()
         schedulePrefetch()
     }
 
@@ -1324,7 +1446,7 @@ final class PlayerService: ObservableObject {
         currentCacheKey = nil
         currentRemoteURL = nil
         let sourceQuality = servedQuality.flatMap(AudioQuality.init) ?? AccountStore.shared.playbackQuality
-        if sourceQuality.usesNativePlayback && !wantsAISoundEffect(for: sourceQuality) {
+        if sourceQuality.usesNativePlayback && !wantsSoundEffect(for: sourceQuality) {
             offlinePlaybackLease = lease
             playNativeSource(url, for: track, quality: servedQuality, duration: lease?.descriptor.duration ?? track.duration,
                              from: position)
@@ -1354,7 +1476,7 @@ final class PlayerService: ObservableObject {
             enginePaused = false
         }
         NowPlayingManager.shared.updateMetadata(for: track, duration: fileDuration)
-        refreshAISoundEffect()
+        refreshSoundEffect()
         schedulePrefetch()
     }
 
@@ -1607,7 +1729,7 @@ final class PlayerService: ObservableObject {
     func checkpointPlayback() { persistState() }
 
     func suspendForAccountChange() {
-        resetAISoundEffect()
+        resetSoundEffect()
         resolveGeneration += 1
         scrobbled = true
         pause()

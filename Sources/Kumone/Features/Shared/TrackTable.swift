@@ -26,7 +26,7 @@ struct TrackTable: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         let scrollView = ScrollView()
-        let table = NSTableView()
+        let table = SongTable()
         private var content: TrackTable?
         private var environment = EnvironmentValues()
         private let headerCell = Cell()
@@ -46,9 +46,15 @@ struct TrackTable: NSViewRepresentable {
             table.rowSizeStyle = .custom
             table.rowHeight = TrackRowStyle.full.desktopRowHeight + 1
             table.usesAutomaticRowHeights = false
-            table.selectionHighlightStyle = .none
+            table.selectionHighlightStyle = .regular
             table.focusRingType = .none
-            table.refusesFirstResponder = true
+            table.refusesFirstResponder = false
+            table.allowsMultipleSelection = false
+            table.allowsEmptySelection = true
+            table.allowsTypeSelect = false
+            table.moveSelection = { [weak self] forward in self?.moveSelection(forward: forward) ?? false }
+            table.activateSelection = { [weak self] in self?.activateSelection() ?? false }
+            table.focusSearch = { [weak self] in self?.focusSearch() ?? false }
             table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
             table.autoresizingMask = [.width]
             table.dataSource = self
@@ -66,26 +72,52 @@ struct TrackTable: NSViewRepresentable {
 
         func update(_ next: TrackTable, environment: EnvironmentValues) {
             let previousIDs = content?.trackIDs
+            let selectedIndex = table.selectedRow - 1
+            let selectedID = previousIDs.flatMap { $0.indices.contains(selectedIndex) ? $0[selectedIndex] : nil }
             let previousRowHeight = content?.rowHeight
             content = next
             self.environment = environment
             let changedHeights = updateChrome(notifyTable: false)
             if previousIDs != next.trackIDs || previousRowHeight != next.rowHeight {
                 table.rowHeight = next.rowHeight
-                table.reloadData()
-            } else {
-                // Permission, search-header and download updates refresh only
-                // existing cells. Playback is observed inside each hosted row.
-                let visible = table.rows(in: table.visibleRect)
-                if visible.location != NSNotFound {
-                    for index in visible.location..<NSMaxRange(visible) {
-                        if let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? Cell {
-                            configure(cell, at: index)
+                if let previousIDs {
+                    // Updating only song rows keeps the header attached while
+                    // typing, including the field editor's Chinese composition.
+                    let difference = next.trackIDs.difference(from: previousIDs)
+                    var removed = IndexSet(), inserted = IndexSet()
+                    for change in difference {
+                        switch change {
+                        case .remove(let index, _, _): removed.insert(index + 1)
+                        case .insert(let index, _, _): inserted.insert(index + 1)
                         }
                     }
+                    NSAnimationContext.runAnimationGroup { animation in
+                        animation.duration = 0
+                        table.beginUpdates()
+                        table.removeRows(at: removed, withAnimation: [])
+                        table.insertRows(at: inserted, withAnimation: [])
+                        table.endUpdates()
+                    }
+                } else {
+                    table.reloadData()
                 }
-                notifyHeightChanges(changedHeights)
+                if let selectedID, let index = next.trackIDs.firstIndex(of: selectedID) {
+                    table.selectRowIndexes(IndexSet(integer: index + 1), byExtendingSelection: false)
+                } else {
+                    table.deselectAll(nil)
+                }
             }
+            // Permission, search-header and download updates refresh only
+            // existing cells. Playback is observed inside each hosted row.
+            let visible = table.rows(in: table.visibleRect)
+            if visible.location != NSNotFound {
+                for index in visible.location..<NSMaxRange(visible) {
+                    if let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? Cell {
+                        configure(cell, at: index)
+                    }
+                }
+            }
+            notifyHeightChanges(changedHeights)
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { (content?.trackIDs.count ?? 0) + 2 }
@@ -96,7 +128,43 @@ struct TrackTable: NSViewRepresentable {
             return content?.rowHeight ?? tableView.rowHeight
         }
 
-        func selectionShouldChange(in tableView: NSTableView) -> Bool { false }
+        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+            row > 0 && row <= (content?.trackIDs.count ?? 0)
+        }
+
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { SelectionRow() }
+
+        @discardableResult
+        func moveSelection(forward: Bool) -> Bool {
+            guard let count = content?.trackIDs.count, count > 0 else { return false }
+            let index = table.selectedRow < 1 ? (forward ? 1 : count)
+                : min(count, max(1, table.selectedRow + (forward ? 1 : -1)))
+            table.window?.makeFirstResponder(table)
+            table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            table.scrollRowToVisible(index)
+            return true
+        }
+
+        @discardableResult
+        func activateSelection() -> Bool {
+            let index = table.selectedRow
+            guard index > 0, index <= (content?.trackIDs.count ?? 0),
+                  let cell = table.view(atColumn: 0, row: index, makeIfNecessary: true) as? Cell else { return false }
+            cell.host.layoutSubtreeIfNeeded()
+            guard let activate = cell.host.descendant(of: TrackActivationTarget.Target.self)?.activate else { return false }
+            activate()
+            return true
+        }
+
+        @discardableResult
+        func focusSearch() -> Bool {
+            guard let field = headerCell.host.descendant(of: ShortcutSearchField.Field.self,
+                                                       matching: { $0.isPlaylistSearch }) else { return false }
+            table.scrollRowToVisible(0)
+            table.layoutSubtreeIfNeeded()
+            field.focusAndSelect()
+            return true
+        }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             if row == 0 { return headerCell }
@@ -170,6 +238,28 @@ struct TrackTable: NSViewRepresentable {
                 animation.duration = 0
                 table.noteHeightOfRows(withIndexesChanged: indexes)
             }
+        }
+    }
+
+    final class SongTable: NSTableView {
+        var moveSelection: ((Bool) -> Bool)?
+        var activateSelection: (() -> Bool)?
+        var focusSearch: (() -> Bool)?
+
+        override func keyDown(with event: NSEvent) {
+            if ShortcutManager.shared.handleKeyEvent(event) { return }
+            // Clearing/reassigning a list shortcut must also disable AppKit's
+            // built-in equivalent, rather than silently restoring the old key.
+            if [36, 76, 125, 126].contains(event.keyCode),
+               event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty { return }
+            super.keyDown(with: event)
+        }
+    }
+
+    final class SelectionRow: NSTableRowView {
+        override func drawSelection(in dirtyRect: NSRect) {
+            NSColor.controlAccentColor.withAlphaComponent(isEmphasized ? 0.12 : 0.07).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 14, dy: 1), xRadius: 6, yRadius: 6).fill()
         }
     }
 

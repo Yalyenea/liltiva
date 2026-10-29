@@ -6,6 +6,77 @@ import Testing
 @Suite("Native song-list geometry")
 @MainActor
 struct TrackTableTests {
+    @Test func filteringRetainsTheSearchEditorAndAllowsContinuousChineseInput() throws {
+        let coordinator = TrackTable.Coordinator()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = coordinator.scrollView
+        var query = ""
+        let header = AnyView(ShortcutSearchField(text: Binding(get: { query }, set: { query = $0 }),
+                                                placeholder: "Search", isPlaylistSearch: true).frame(height: 30))
+        func content(_ ids: [Int]) -> TrackTable {
+            TrackTable(trackIDs: ids, header: header, footer: AnyView(Color.clear),
+                       headerHeight: 40, footerHeight: 20) { _ in AnyView(Text("Song")) }
+        }
+        coordinator.update(content(Array(0..<200)), environment: EnvironmentValues())
+        coordinator.table.layoutSubtreeIfNeeded()
+        let field = try #require(coordinator.scrollView.descendant(of: ShortcutSearchField.Field.self))
+        field.focusAndSelect()
+        let editor = try #require(window.firstResponder as? NSTextView)
+        editor.insertText("夜", replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(query == "夜")
+        coordinator.update(content([1, 4]), environment: EnvironmentValues())
+        #expect(window.firstResponder === editor)
+        #expect(field.window === window)
+        editor.insertText("曲", replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(query == "夜曲")
+        coordinator.update(content(Array(0..<200)), environment: EnvironmentValues())
+        window.makeFirstResponder(coordinator.table)
+        coordinator.table.scrollRowToVisible(199)
+        coordinator.table.layoutSubtreeIfNeeded()
+        #expect(coordinator.focusSearch())
+        #expect((window.firstResponder as? NSTextView)?.delegate === field)
+    }
+
+    @Test func keyboardSelectionSkipsChromeAndFollowsTrackIdentityAfterFiltering() {
+        let coordinator = TrackTable.Coordinator()
+        var content = fixture(count: 3)
+        coordinator.update(content, environment: EnvironmentValues())
+        #expect(!coordinator.tableView(coordinator.table, shouldSelectRow: 0))
+        #expect(!coordinator.tableView(coordinator.table, shouldSelectRow: 4))
+        #expect(coordinator.moveSelection(forward: true))
+        #expect(coordinator.table.selectedRow == 1)
+        #expect(coordinator.moveSelection(forward: true))
+        #expect(coordinator.table.selectedRow == 2)
+        content = TrackTable(trackIDs: [1, 2], header: content.header, footer: content.footer,
+                             headerHeight: 246, footerHeight: 100, row: content.row)
+        coordinator.update(content, environment: EnvironmentValues())
+        #expect(coordinator.table.selectedRow == 1)
+        coordinator.update(fixture(count: 0), environment: EnvironmentValues())
+        #expect(coordinator.table.selectedRow == -1)
+        #expect(!coordinator.moveSelection(forward: true))
+        #expect(!coordinator.activateSelection())
+    }
+
+    @Test func returnUsesHostedRowActionAndHonorsDisabledRows() {
+        let coordinator = TrackTable.Coordinator()
+        coordinator.scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        var activated: [Int] = []
+        let content = TrackTable(trackIDs: [1, 2], header: AnyView(Color.clear), footer: AnyView(Color.clear),
+                                 headerHeight: 20, footerHeight: 20) { index in
+            AnyView(Text("Song").background(TrackActivationTarget { activated.append(index) }).disabled(index == 1))
+        }
+        coordinator.update(content, environment: EnvironmentValues())
+        #expect(coordinator.moveSelection(forward: true))
+        #expect(coordinator.activateSelection())
+        #expect(activated == [0])
+        #expect(coordinator.moveSelection(forward: true))
+        #expect(!coordinator.activateSelection())
+        #expect(activated == [0])
+    }
+
     @Test(arguments: [true, false])
     func offscreenHeaderRetainsItsHeightAcrossContentUpdates(explicitHeight: Bool) {
         let coordinator = TrackTable.Coordinator()

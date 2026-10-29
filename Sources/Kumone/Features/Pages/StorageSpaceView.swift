@@ -8,8 +8,8 @@ struct StorageSpaceView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        Form {
-            Section {
+        SettingsForm {
+            SettingsSection {
                 VStack(alignment: .leading, spacing: 12) {
                     if let capacity = model.snapshot?.device {
                         ViewThatFits(in: .horizontal) {
@@ -33,14 +33,14 @@ struct StorageSpaceView: View {
                 .padding(.vertical, 4)
             }
 
-            Section {
+            SettingsSection {
                 LabeledContent(model.snapshot?.partial == true ? String(localized: "已统计的 Liltiva 占用") : String(localized: "Liltiva 占用")) {
                     Text(model.snapshot.map { format($0.appBytes) } ?? "—")
                         .font(.body.weight(.semibold)).monospacedDigit()
                 }
             }
 
-            Section {
+            SettingsSection {
                 usageRow("图片缓存", icon: "photo.on.rectangle", category: .imageCache)
                 Button(role: .destructive) { Task { await model.clear(.imageCache) } } label: {
                     HStack {
@@ -56,14 +56,14 @@ struct StorageSpaceView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Section {
+            SettingsSection {
                 usageRow("歌曲缓存", icon: "music.note", category: .musicCache)
-                Picker("上限", selection: $settings.audioCacheLimit) {
-                    Text("512 MB").tag(Int64(512) << 20)
-                    Text("2 GB").tag(Int64(2) << 30)
-                    Text("8 GB").tag(Int64(8) << 30)
-                    Text("不限").tag(Int64(0))
-                }
+                SettingsPicker("上限", selection: $settings.audioCacheLimit, options: [
+                    .init(value: Int64(512) << 20, title: "512 MB"),
+                    .init(value: Int64(2) << 30, title: "2 GB"),
+                    .init(value: Int64(8) << 30, title: "8 GB"),
+                    .init(value: Int64(0), title: String(localized: "不限")),
+                ])
                 Button(role: .destructive) { Task { await model.clear(.musicCache) } } label: {
                     HStack {
                         Text("清除歌曲缓存")
@@ -78,7 +78,7 @@ struct StorageSpaceView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Section {
+            SettingsSection {
                 Button(action: onManageDownloads) {
                     HStack {
                         Label("已下载", systemImage: "arrow.down.circle")
@@ -99,7 +99,7 @@ struct StorageSpaceView: View {
                 }
             }
 
-            Section {
+            SettingsSection {
                 usageRow("应用数据", icon: "internaldrive", category: .appData)
             } footer: {
                 Text("应用、歌词、离线封面与账号资料。")
@@ -109,11 +109,9 @@ struct StorageSpaceView: View {
             }
 
             if let message = model.message ?? (model.snapshot?.partial == true ? String(localized: "部分存储信息不可用") : nil) {
-                Section { Text(message).font(.footnote).foregroundStyle(.secondary).accessibilityAddTraits(.updatesFrequently) }
+                SettingsSection { Text(message).font(.footnote).foregroundStyle(.secondary).accessibilityAddTraits(.updatesFrequently) }
             }
         }
-        .formStyle(.grouped)
-        .navigationTitle("存储空间")
         .task(id: scenePhase) {
             if scenePhase == .active, !model.isClearing {
                 await model.reload()

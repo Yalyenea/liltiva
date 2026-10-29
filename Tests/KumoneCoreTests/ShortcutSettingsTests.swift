@@ -6,6 +6,98 @@ import Testing
 
 @Suite @MainActor
 struct ShortcutSettingsTests {
+    @Test func escapeLeavesSearchBeforeClosingThePlaybackPanel() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 100),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let field = ShortcutSearchField.Field()
+        window.contentView = field
+        var exits = 0
+        field.exit = { exits += 1 }
+        field.focusAndSelect()
+        let player = PlayerService.shared
+        let original = player.activePanel
+        defer { player.activePanel = original }
+        player.activePanel = .queue
+        let escape = try keyEvent(code: 53, key: "\u{1B}", windowNumber: window.windowNumber)
+        #expect(AppDelegate.interceptKeyEvent(escape) == nil)
+        #expect(exits == 1)
+        #expect(player.activePanel == .queue)
+    }
+
+    @Test func oldBindingsReceiveNewActionsWithoutStealingCustomKeys() throws {
+        let suite = "liltiva-shortcuts-\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let stored = try JSONSerialization.data(withJSONObject: ["app": [
+            "toggleLike", ["key": "f", "modifiers": 0],
+            "toggleQueue", ["key": "", "modifiers": 0]
+        ]])
+        defaults.set(stored, forKey: ShortcutManager.bindingsKey)
+        let manager = ShortcutManager(userDefaults: defaults)
+        #expect(manager.shortcut(for: .toggleLike) == UserShortcut(key: "f", modifiers: []))
+        #expect(manager.shortcut(for: .searchPlaylist) == .unassigned)
+        #expect(manager.shortcut(for: .searchLibrary) == UserShortcut(key: "f", modifiers: .shift))
+        #expect(manager.shortcut(for: .toggleQueue) == .unassigned)
+        #expect(manager.appShortcuts.count == ShortcutAction.allCases.count)
+        // New defaults are available to the actual event matcher, not just the settings labels.
+        #expect(!manager.handleKeyEvent(try keyEvent(code: 46, key: "M", flags: .shift)))
+    }
+
+    @Test func duplicateAndReservedBindingsAreRejectedWithoutChangingSavedData() throws {
+        let suite = "liltiva-shortcuts-\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = ShortcutManager(userDefaults: defaults)
+        let saved = defaults.data(forKey: ShortcutManager.bindingsKey)
+        #expect(throws: (any Error).self) {
+            try manager.setShortcut(UserShortcut(key: "F", modifiers: []), for: .nextTrack)
+        }
+        for key in ["q", "c", "[", "1"] {
+            #expect(throws: (any Error).self) {
+                try manager.setShortcut(UserShortcut(key: key, modifiers: .command), for: .nextTrack)
+            }
+        }
+        #expect(defaults.data(forKey: ShortcutManager.bindingsKey) == saved)
+        try manager.setShortcut(UserShortcut(key: "N", modifiers: .shift), for: .nextTrack)
+        #expect(manager.shortcut(for: .nextTrack) == UserShortcut(key: "n", modifiers: .shift))
+    }
+
+    @Test func typingKeepsLettersShiftedLettersSpaceAndArrowsInTheEditor() throws {
+        let suite = "liltiva-shortcuts-\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = ShortcutManager(userDefaults: defaults)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 100),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let editor = NSTextView()
+        window.contentView = editor
+        try #require(window.makeFirstResponder(editor))
+        for (key, code, flags) in [("f", UInt16(3), NSEvent.ModifierFlags()), ("F", 3, .shift),
+                                    ("Y", 16, .shift), (" ", 49, []), ("\u{F702}", 123, [])] {
+            #expect(!manager.handleKeyEvent(try keyEvent(code: code, key: key, flags: flags,
+                                                        windowNumber: window.windowNumber)))
+        }
+    }
+
+    @Test func muteRestoresLatestNonzeroVolume() {
+        let player = PlayerService.shared
+        let original = player.volume
+        defer { player.volume = original }
+        player.volume = 0.37
+        player.toggleMute()
+        #expect(player.volume == 0)
+        player.toggleMute()
+        #expect(player.volume == 0.37)
+        player.volume = 0.64
+        player.volume = 0
+        player.toggleMute()
+        #expect(player.volume == 0.64)
+    }
+
     @Test func removingQueueOrderPreservesCustomAndDisabledBindings() throws {
         let suite = "kumone-shortcuts-\(UUID())"
         let defaults = try #require(UserDefaults(suiteName: suite))

@@ -1,31 +1,67 @@
 import AVFoundation
 import Foundation
 
-/// Only the official per-song EQ parameters are rendered here. Other groups
-/// in the document (reverb, stereo enhancement, feature analysis) belong to
-/// NetEase's native DSP and are deliberately not presented as supported.
+/// Official parameters are composed before rendering. NetEase's proprietary
+/// spatial/reverb engine is implemented locally, so its output is not bit exact.
 struct AISoundEffect: Codable, Equatable, Sendable {
     struct Parameters: Codable, Equatable, Sendable {
         struct Equalizer: Codable, Equatable, Sendable {
-            let on: Bool
-            let eqs: [Double]
+            var on: Bool
+            var eqs: [Double]
         }
-        let eq: Equalizer
-    }
-    let aev2: Parameters
-    let effectStyle: String?
+        var eq: Equalizer
+        var groups: [String: SoundEffectValue]
 
-    enum CodingKeys: String, CodingKey { case aev2; case effectStyle = "effect_style" }
+        init(eq: Equalizer = .init(on: false, eqs: Array(repeating: 0, count: 10)),
+             groups: [String: SoundEffectValue] = [:]) {
+            self.eq = eq
+            self.groups = groups
+        }
+
+        init(from decoder: Decoder) throws {
+            groups = try [String: SoundEffectValue](from: decoder)
+            let value = groups.removeValue(forKey: "eq") ?? .null
+            eq = Equalizer(on: value.enabled, eqs: value["eqs"].array.compactMap(\.number))
+            if !eq.on && eq.eqs.isEmpty { eq.eqs = Array(repeating: 0, count: 10) }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var values = groups
+            values["eq"] = .object(["on": .bool(eq.on), "eqs": .array(eq.eqs.map(SoundEffectValue.number))])
+            try values.encode(to: encoder)
+        }
+        subscript(_ group: String) -> SoundEffectValue {
+            get { groups[group] ?? .null }
+            set { groups[group] = newValue }
+        }
+    }
+    var aev2: Parameters
+    let effectStyle: String?
+    var feature: SoundEffectValue? = nil
+    var impulse: SoundEffectImpulse? = nil
+
+    enum CodingKeys: String, CodingKey { case aev2, feature, impulse; case effectStyle = "effect_style" }
 
     func validate() throws {
         guard aev2.eq.eqs.count == 10,
               aev2.eq.eqs.allSatisfy({ $0.isFinite && (-24...24).contains($0) }) else {
             throw NCAEContainer.DecodingError.invalidPayload
         }
+        try SoundEffectValidation.validate(aev2.groups)
+        try impulse?.validate()
     }
 
     static func decode(package: Data) throws -> Self {
-        let effect = try JSONDecoder().decode(Self.self, from: NCAEContainer.decode(package))
+        let payload = try NCAEContainer.decodeMaterial(package)
+        let effect: Self
+        if payload.kind == .impulse {
+            effect = Self(aev2: .init(), effectStyle: nil, impulse: try SoundEffectImpulse.decode(wave: payload.data))
+        } else {
+            let value = try JSONDecoder().decode(SoundEffectValue.self, from: payload.data)
+            let parameters = value["aev2"] == .null ? value : value["aev2"]
+            effect = Self(aev2: try JSONDecoder().decode(Parameters.self, from: JSONEncoder().encode(parameters)),
+                          effectStyle: value["effect_style"].stringValue, feature: value.object["feature"])
+        }
         try effect.validate()
         return effect
     }
@@ -87,20 +123,22 @@ struct AISoundEffect: Codable, Equatable, Sendable {
     }
 }
 
-enum AISoundEffectState: Equatable {
-    case off, requiresSVIP, waiting, loading, ready, unavailable, offlineMissing, unsupportedSource, failed
+enum SoundEffectState: Equatable {
+    case off, requiresLogin, requiresSVIP, unauthorized, waiting, loading, ready, unavailable, offlineMissing, unsupportedSource, failed
 
     var displayName: String {
         switch self {
-        case .off: return String(localized: "已关闭")
+        case .off: return String(localized: "音效已关闭")
+        case .requiresLogin: return String(localized: "登录后可使用音效")
         case .requiresSVIP: return String(localized: "需要黑胶 SVIP")
-        case .waiting: return String(localized: "播放后自动加载调音")
-        case .loading: return String(localized: "正在加载调音…")
-        case .ready: return String(localized: "官方均衡曲线已应用")
-        case .unavailable: return String(localized: "这首歌暂无 AI 调音")
-        case .offlineMissing: return String(localized: "联网后可加载这首歌的调音")
-        case .unsupportedSource: return String(localized: "空间音质暂不支持 AI 调音")
-        case .failed: return String(localized: "调音加载失败，可点击重试")
+        case .unauthorized: return String(localized: "当前账号暂无此音效权益")
+        case .waiting: return String(localized: "播放后自动加载音效")
+        case .loading: return String(localized: "正在加载音效…")
+        case .ready: return String(localized: "音效已应用")
+        case .unavailable: return String(localized: "暂无可用音效")
+        case .offlineMissing: return String(localized: "联网后可加载此音效")
+        case .unsupportedSource: return String(localized: "空间音质暂不支持音效")
+        case .failed: return String(localized: "音效加载失败，请重试")
         }
     }
 }

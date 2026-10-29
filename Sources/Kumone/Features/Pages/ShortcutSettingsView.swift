@@ -4,21 +4,29 @@ import AppKit
 struct ShortcutSettingsView: View {
     @ObservedObject private var manager = ShortcutManager.shared
     @State private var recordingAction: ShortcutAction?
+    @State private var query = ""
 
     var body: some View {
-        VStack(spacing: 0) {
-            Text("点击快捷键开始录制。Delete 清除，Esc 取消。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                .padding(.bottom, 4)
-
-            Form {
-                Section {
-                    ForEach(ShortcutAction.allCases) { action in
-                        ShortcutRow(action: action,
+        SettingsForm {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 16) {
+                    TextField("筛选快捷键", text: $query)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("filter-shortcuts")
+                    Button("恢复默认") {
+                        recordingAction = nil
+                        do { try manager.resetToDefaults() }
+                        catch { ToastCenter.shared.show(error.localizedDescription) }
+                    }
+                    .fixedSize()
+                }
+            }
+            ForEach(ShortcutCategory.allCases) { group in
+                let actions = group.actions.filter { query.isEmpty || $0.displayName.localizedCaseInsensitiveContains(query) }
+                if !actions.isEmpty {
+                    SettingsSection(group.title) {
+                        ForEach(actions) { action in
+                            ShortcutRow(action: action,
                                     shortcut: manager.shortcut(for: action),
                                     isRecording: Binding(
                                         get: { recordingAction == action },
@@ -27,21 +35,14 @@ struct ShortcutSettingsView: View {
                                             else if recordingAction == action { recordingAction = nil }
                                         }
                                     ))
+                        }
                     }
-                }
-
-                Section {
-                    Button("恢复默认") {
-                        do {
-                            try manager.resetToDefaults()
-                        } catch { ToastCenter.shared.show(error.localizedDescription) }
-                    }
-                    .foregroundColor(.red)
                 }
             }
-            .formStyle(.grouped)
+            if !query.isEmpty, !ShortcutAction.allCases.contains(where: { $0.displayName.localizedCaseInsensitiveContains(query) }) {
+                Text("没有匹配的快捷键").foregroundStyle(.secondary)
+            }
         }
-        .navigationTitle("快捷键")
         .onDisappear { recordingAction = nil }
     }
 }
@@ -51,53 +52,64 @@ struct ShortcutRow: View {
     let shortcut: UserShortcut
     @Binding var isRecording: Bool
     @FocusState private var isFocused: Bool
+    @State private var errorMessage: String?
 
     var body: some View {
-        HStack {
-            Label(action.displayName, systemImage: action.systemImage)
-            Spacer()
-            Button {
-                isRecording = true
-                isFocused = true
-            } label: {
-                Text(isRecording ? String(localized: "录制中…") : shortcut.displayString)
-                    .font(.system(.body, design: .monospaced))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .frame(minWidth: 80)
-                    .background(isRecording ? Color.accentColor : Color.secondary.opacity(0.15))
-                    .cornerRadius(6)
-                    .foregroundColor(isRecording ? .white : .primary)
-            }
-            .buttonStyle(.plain)
-            .focused($isFocused)
-            .help("Delete 清除 · Esc 取消")
-            .accessibilityLabel(Text(action.displayName))
-            .accessibilityValue(Text(isRecording ? String(localized: "录制中…") : shortcut.displayString))
-            .accessibilityHint(Text("Delete 清除 · Esc 取消"))
-            .accessibilityAction(named: Text("清除快捷键"), clearShortcut)
-            .contextMenu {
-                if !isRecording, !shortcut.key.isEmpty {
-                    Button("清除快捷键", action: clearShortcut)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(action.displayName, systemImage: action.systemImage)
+                Spacer()
+                Button {
+                    isRecording = true
+                    errorMessage = nil
+                    isFocused = true
+                } label: {
+                    Text(isRecording ? String(localized: "录制中…") : shortcut.displayString)
+                        .font(.system(.body, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .frame(minWidth: 80)
+                        .background(isRecording ? Color.accentColor : Color.secondary.opacity(0.15))
+                        .cornerRadius(6)
+                        .foregroundColor(isRecording ? .white : .primary)
                 }
-            }
+                .buttonStyle(.plain)
+                .focused($isFocused)
+                .help("Delete 清除 · Esc 取消")
+                .accessibilityLabel(Text(action.displayName))
+                .accessibilityValue(Text(isRecording ? String(localized: "录制中…") : shortcut.displayString))
+                .accessibilityIdentifier("shortcut-\(action.rawValue)")
+                .accessibilityHint(Text("Delete 清除 · Esc 取消"))
+                .accessibilityAction(named: Text("清除快捷键"), clearShortcut)
+                .contextMenu {
+                    if !isRecording, !shortcut.key.isEmpty {
+                        Button("清除快捷键", action: clearShortcut)
+                    }
+                }
 
-            if isRecording {
-                ShortcutRecorderView(isRecording: $isRecording, onClear: clearShortcut) { key, modifiers in
-                    do {
-                        try ShortcutManager.shared.setShortcut(
-                            UserShortcut(key: key, modifiers: modifiers), for: action)
-                    } catch { ToastCenter.shared.show(error.localizedDescription) }
+                if isRecording {
+                    ShortcutRecorderView(isRecording: $isRecording, onClear: clearShortcut) { key, modifiers in
+                        do {
+                            try ShortcutManager.shared.setShortcut(
+                                UserShortcut(key: key, modifiers: modifiers), for: action)
+                            errorMessage = nil
+                        } catch { errorMessage = error.localizedDescription }
+                    }
+                    .frame(width: 0, height: 0)
                 }
-                .frame(width: 0, height: 0)
+            }
+            if let errorMessage {
+                Text(errorMessage).font(.system(size: 11)).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.updatesFrequently)
             }
         }
-        .padding(.vertical, 2)
     }
 
     private func clearShortcut() {
         do {
             try ShortcutManager.shared.clearShortcut(for: action)
+            errorMessage = nil
             isRecording = false
         } catch { ToastCenter.shared.show(error.localizedDescription) }
     }
@@ -116,6 +128,36 @@ extension ShortcutAction {
         case .closeImmersive: return "xmark.circle"
         case .volumeUp: return "speaker.wave.2"
         case .volumeDown: return "speaker.wave.1"
+        case .searchPlaylist: return "line.3.horizontal.decrease"
+        case .searchLibrary: return "magnifyingglass"
+        case .toggleNowPlaying: return "record.circle"
+        case .toggleMute: return "speaker.slash"
+        case .seekBackward: return "gobackward.5"
+        case .seekForward: return "goforward.5"
+        case .toggleDesktopLyrics: return "inset.filled.bottomthird.square"
+        case .selectPreviousRow: return "arrow.up"
+        case .selectNextRow: return "arrow.down"
+        case .playSelectedRow: return "return"
+        }
+    }
+}
+
+private enum ShortcutCategory: CaseIterable, Identifiable {
+    case search, playback, presentation
+    var id: Self { self }
+    var title: LocalizedStringKey {
+        switch self {
+        case .search: return "搜索与选歌"
+        case .playback: return "播放控制"
+        case .presentation: return "播放界面"
+        }
+    }
+    var actions: [ShortcutAction] {
+        switch self {
+        case .search: return [.searchPlaylist, .searchLibrary, .selectPreviousRow, .selectNextRow, .playSelectedRow]
+        case .playback: return [.togglePlayPause, .previousTrack, .nextTrack, .seekBackward, .seekForward,
+                                .cycleRepeatMode, .toggleLike, .toggleMute, .volumeUp, .volumeDown]
+        case .presentation: return [.toggleNowPlaying, .toggleLyrics, .toggleDesktopLyrics, .toggleQueue, .closeImmersive]
         }
     }
 }

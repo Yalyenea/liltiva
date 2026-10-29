@@ -23,6 +23,7 @@ final class PlaybackEngine: @unchecked Sendable {
     private let player = AVAudioPlayerNode()
     private var graphFormat = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2)!
     private let soundEqualizer = AVAudioUnitEQ(numberOfBands: 10)
+    private let soundRenderer = LocalSoundEffectRenderer()
     private var soundEffect: AISoundEffect?
     private var soundEffectStrength = 1.0
 
@@ -59,6 +60,7 @@ final class PlaybackEngine: @unchecked Sendable {
         continuation = c
         engine.attach(player)
         engine.attach(soundEqualizer)
+        engine.attach(soundRenderer.node)
         soundEqualizer.bypass = true
         connectGraphLocked()
         configObserver = NotificationCenter.default.addObserver(
@@ -116,7 +118,7 @@ final class PlaybackEngine: @unchecked Sendable {
             resetLocked()
             let format = file.processingFormat
             let target = preserveSampleRate
-                ? AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: format.channelCount)!
+                ? AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 2)!
                 : AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2)!
             configureGraphFormatLocked(target)
             if format.sampleRate == graphFormat.sampleRate,
@@ -259,6 +261,8 @@ final class PlaybackEngine: @unchecked Sendable {
         case .none, .file: break
         }
         player.stop()
+        soundEqualizer.reset()
+        soundRenderer.node.reset()
         source = .none
         wantsPlayback = false
         isPaused = false
@@ -296,6 +300,10 @@ final class PlaybackEngine: @unchecked Sendable {
     private func resetScheduleLocked(from seconds: TimeInterval) {
         generation += 1
         player.stop()
+        // A seek is a discontinuity: neither filters nor convolution/reverb
+        // may carry the previous position's history into the new audio.
+        soundEqualizer.reset()
+        soundRenderer.node.reset()
         pendingBuffers = 0
         streamEnded = false
         streamStalled = false
@@ -422,7 +430,8 @@ final class PlaybackEngine: @unchecked Sendable {
 
     private func connectGraphLocked() {
         engine.connect(player, to: soundEqualizer, format: graphFormat)
-        engine.connect(soundEqualizer, to: engine.mainMixerNode, format: graphFormat)
+        engine.connect(soundEqualizer, to: soundRenderer.node, format: graphFormat)
+        engine.connect(soundRenderer.node, to: engine.mainMixerNode, format: graphFormat)
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
         engine.mainMixerNode.outputVolume = userVolume
         applySoundEffectLocked()
@@ -434,6 +443,7 @@ final class PlaybackEngine: @unchecked Sendable {
         if mixerTapInstalled { engine.mainMixerNode.removeTap(onBus: 0); mixerTapInstalled = false }
         engine.disconnectNodeOutput(player)
         engine.disconnectNodeOutput(soundEqualizer)
+        engine.disconnectNodeOutput(soundRenderer.node)
         graphFormat = format
         connectGraphLocked()
         installOutputSampleSinkLocked()
@@ -450,6 +460,7 @@ final class PlaybackEngine: @unchecked Sendable {
     private func applySoundEffectLocked() {
         AISoundEffect.configure(soundEqualizer, effect: soundEffect, strength: soundEffectStrength,
                                 sampleRate: graphFormat.sampleRate)
+        soundRenderer.configure(effect: soundEffect, strength: soundEffectStrength, sampleRate: graphFormat.sampleRate)
     }
 
     func setOutputSampleSink(_ sink: (@Sendable (AVAudioPCMBuffer) -> Void)?) {
@@ -521,6 +532,28 @@ final class PlaybackEngine: @unchecked Sendable {
                     for frame in 0..<Int(buffer.frameLength) { peak = max(peak, abs(channels[channel][frame])) }
                 }
                 block(peak)
+            }
+            monitorInstalled = true
+        }
+    }
+    func setTimedOutputMonitor(_ block: (@Sendable (Float, TimeInterval) -> Void)?) {
+        queue.sync {
+            if monitorInstalled { player.removeTap(onBus: 0); monitorInstalled = false }
+            guard let block else { return }
+            player.installTap(onBus: 0, bufferSize: 512, format: graphFormat) { buffer, when in
+                guard let channels = buffer.floatChannelData, when.isHostTimeValid else { return }
+                // Tap buffers may be much larger than requested and arrive
+                // late. Timestamp small windows by their actual first sample.
+                let start = AVAudioTime.seconds(forHostTime: when.hostTime)
+                for offset in stride(from: 0, to: Int(buffer.frameLength), by: 512) {
+                    var peak: Float = 0
+                    for channel in 0..<Int(buffer.format.channelCount) {
+                        for frame in offset..<min(offset + 512, Int(buffer.frameLength)) {
+                            peak = max(peak, abs(channels[channel][frame]))
+                        }
+                    }
+                    block(peak, start + Double(offset) / buffer.format.sampleRate)
+                }
             }
             monitorInstalled = true
         }

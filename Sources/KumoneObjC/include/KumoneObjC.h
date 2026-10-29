@@ -11,3 +11,5 @@ NS_ASSUME_NONNULL_BEGIN
 FOUNDATION_EXPORT NSException *_Nullable KumoneCatchException(NS_NOESCAPE void (^block)(void));
 
 NS_ASSUME_NONNULL_END
+
+#import "LiltivaSoundEffectUnit.h"

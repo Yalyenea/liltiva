@@ -210,11 +210,11 @@
 
 /* Settings */
 "音质" = "Audio Quality";
-"标准" = "Standard";
-"较高" = "Higher";
-"极高" = "Extreme";
-"无损" = "Lossless";
-"高解析" = "Hi-Res";
+"标准" = "标准";
+"较高" = "较高";
+"极高" = "极高";
+"无损" = "无损";
+"高解析" = "高解析";
 "无损与 Hi-Res 需要黑胶 VIP，未开通时自动回落到可用音质" = "Lossless and Hi-Res require VIP; falls back automatically otherwise";
 "外观" = "Appearance";
 "主题" = "Theme";
@@ -312,7 +312,7 @@
 
 /* Keyboard shortcuts (macOS) */
 "返回" = "Back";
-"快捷键" = "Keyboard Shortcuts";
+"快捷键" = "Shortcuts";
 "播放 / 暂停" = "Play / Pause";
 "增加音量" = "Volume Up";
 "减少音量" = "Volume Down";
@@ -476,7 +476,7 @@
 "接续需要登录同一网易云账号" = "Sign in to the same NetEase account to continue playback";
 "iCloud 账号已更改" = "iCloud account changed";
 
-"全歌词" = "Lyrics only";
+"歌词模式" = "Lyrics";
 "账户与设置" = "Account and settings";
 "登录后同步你的音乐" = "Sign in to sync your music";
 "设置" = "Settings";
@@ -492,11 +492,11 @@
 "普通账号" = "Free account";
 "黑胶 VIP" = "VIP";
 "黑胶 SVIP" = "SVIP";
-"高清臻音" = "Premium audio";
-"超清母带" = "Master audio";
-"沉浸环绕声" = "Immersive surround";
-"杜比全景声" = "Dolby Atmos";
-"臻音全景声" = "Audio Vivid";
+"高清臻音" = "高清臻音";
+"超清母带" = "超清母带";
+"沉浸环绕声" = "沉浸环绕声";
+"杜比全景声" = "杜比全景声";
+"臻音全景声" = "臻音全景声";
 "账号权益" = "Membership";
 "当前音质" = "Current quality";
 "重试会员信息" = "Refresh membership";
@@ -524,7 +524,7 @@
 "点击快捷键开始录制。Delete 清除，Esc 取消。" = "Click a shortcut to record it. Delete clears it; Esc cancels.";
 "网易云音乐第三方客户端。数据来自网易云音乐。" = "A third-party NetEase Music client. Music data comes from NetEase Music.";
 "黑胶模式" = "Vinyl";
-"经典模式" = "Album artwork";
+"经典模式" = "Classic";
 "播放页模式" = "Now Playing layout";
 "透明模式" = "Transparent mode";
 "播放页设置" = "Now Playing options";
@@ -583,7 +583,7 @@
 "前进" = "Forward";
 
 // AI sound effects
-"AI 调音大师" = "AI Audio Master";
+"AI调音大师" = "AI调音大师";
 "启用 AI 调音" = "Enable AI tuning";
 "需要黑胶 SVIP" = "Requires SVIP";
 "播放后自动加载调音" = "Tuning loads when playback starts";
@@ -598,3 +598,78 @@
 "使用官方逐曲均衡曲线，保留源采样率。混响与空间增强暂不支持。" = "Uses official per-song EQ curves at the source sample rate. Reverb and spatial enhancement are not supported yet.";
 "耳机已设置均衡器时，可降低调音强度后对比试听。" = "If your headphones already use EQ, try a lower tuning strength and compare.";
 "联网后可加载这首歌的调音" = "Connect to load tuning for this song";
+
+/* Keyboard navigation and settings */
+"全局搜索" = "Search All Music";
+"打开 / 收起播放页" = "Show / Hide Now Playing";
+"静音 / 恢复音量" = "Mute / Restore Volume";
+"后退 5 秒" = "Back 5 Seconds";
+"前进 5 秒" = "Forward 5 Seconds";
+"选择上一首歌曲" = "Select Previous Song";
+"选择下一首歌曲" = "Select Next Song";
+"播放选中歌曲" = "Play Selected Song";
+"搜索与选歌" = "Search & Selection";
+"播放控制" = "Playback";
+"播放界面" = "Player";
+"筛选快捷键" = "Filter shortcuts";
+"没有匹配的快捷键" = "No matching shortcuts";
+"已用于「%@」，请换一个按键。" = "Already used for “%@”. Choose another key.";
+"此组合键用于系统或页面操作，请换一个按键。" = "This shortcut is used by the system or navigation. Choose another key.";
+"无" = "None";
+"高解析度无损" = "高解析度无损";
+"音效已关闭" = "Effects off";
+
+"语言" = "Language";
+"重启后生效" = "Takes effect after restart";
+"重新启动" = "Restart";
+"无法重新启动，请退出后重新打开 Liltiva。" = "Could not restart. Quit and reopen Liltiva.";
+"音效" = "Sound effects";
+"音效模式" = "Effect mode";
+"关闭音效" = "Off";
+"智能音效" = "智能音效";
+"情绪调音师" = "情绪调音师";
+"（本地）" = " (Local)";
+"音效列表" = "Effects";
+"预设音效" = "Preset";
+"选择音效" = "Choose an effect";
+"重新加载音效列表" = "Reload effects";
+"音效状态" = "Effect status";
+"歌曲情绪" = "Song mood";
+"重试音效" = "Retry effect";
+"音效设置…" = "Effect settings…";
+"使用官方歌曲分析数据，由 Liltiva 本地调音。" = "Tuned locally by Liltiva using official song analysis.";
+"采用官方参数，本地处理的听感与网易云音乐可能有差异。" = "Uses official parameters. Local processing may sound different from NetEase Music.";
+"个性偏好" = "Tuning preferences";
+"重置偏好" = "Reset preferences";
+"低频增强" = "Bass boost";
+"高频增强" = "Treble boost";
+"人声增强" = "Vocal boost";
+"提升氛围感" = "Enhance ambience";
+"提升现场感" = "Enhance live presence";
+"登录后可使用音效" = "Sign in to use sound effects";
+"当前账号暂无此音效权益" = "This effect is not included in your membership";
+"播放后自动加载音效" = "Effects load when playback starts";
+"正在加载音效…" = "Loading effect…";
+"音效已应用" = "Effect applied";
+"暂无可用音效" = "No effect available";
+"联网后可加载此音效" = "Connect to load this effect";
+"空间音质暂不支持音效" = "Effects are unavailable for spatial audio";
+"音效加载失败，请重试" = "Could not load the effect. Try again.";
+"鼓声较少，本曲未启用" = "Not applied: this song has little percussion";
+"低频已充足，本曲未启用" = "Not applied: this song already has enough bass";
+"高频已充足，本曲未启用" = "Not applied: this song already has enough treble";
+"人声较少，本曲未启用" = "Not applied: this song has few vocals";
+"本曲采用氛围增强" = "Ambience selected for this song";
+"本曲采用现场增强" = "Live presence selected for this song";
+
+/* Compact top navigation */
+"navigation.tab.liked" = "Liked";
+"navigation.tab.created" = "Created";
+"navigation.tab.downloaded" = "Downloaded";
+"navigation.tab.recents" = "Recent";
+"navigation.tab.collections" = "Collections";
+"navigation.tab.cloud" = "Cloud";
+"navigation.tab.profile" = "Profile";
+"navigation.tab.messages" = "Messages";
+"收藏分类" = "Collection category";
+"登录后查看你的收藏" = "Sign in to see your collections";

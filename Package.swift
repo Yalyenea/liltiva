@@ -58,7 +58,8 @@ let package = Package(
         // AVFAudio reports some failures as NSExceptions Swift cannot catch.
         .target(
             name: "KumoneObjC",
-            path: "Sources/KumoneObjC"
+            path: "Sources/KumoneObjC",
+            linkerSettings: [.linkedFramework("Accelerate")]
         ),
         .executableTarget(
             name: "KumoneLauncher",
@@ -83,5 +84,6 @@ let package = Package(
             ] + cltTestingSwiftSettings,
             linkerSettings: cltTestingLinkerSettings
         ),
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )

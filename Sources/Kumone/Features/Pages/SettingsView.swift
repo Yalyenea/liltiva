@@ -7,6 +7,7 @@ struct SettingsView: View {
     @ObservedObject private var player = PlayerService.shared
     @Environment(\.openDestination) private var openDestination
     @State private var category: SettingsCategory = .playback
+    @State private var isRestarting = false
 
     private enum SettingsCategory: String, CaseIterable, Identifiable {
         case playback, appearance, lyrics, storage, shortcuts, sync, about
@@ -18,9 +19,9 @@ struct SettingsView: View {
             case .playback: return String(localized: "播放")
             case .appearance: return String(localized: "外观")
             case .lyrics: return String(localized: "歌词")
-            case .storage: return String(localized: "下载与存储")
+            case .storage: return String(localized: "存储")
             case .shortcuts: return String(localized: "快捷键")
-            case .sync: return String(localized: "同步与账户")
+            case .sync: return String(localized: "账户")
             case .about: return String(localized: "关于")
             }
         }
@@ -40,7 +41,7 @@ struct SettingsView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let showsSidebar = geometry.size.width >= 680
+            let showsSidebar = geometry.size.width >= 600
             HStack(spacing: 0) {
                 if showsSidebar {
                     categorySidebar
@@ -48,28 +49,25 @@ struct SettingsView: View {
                 }
 
                 VStack(spacing: 0) {
-                    categoryHeader(showsSidebar: showsSidebar)
-                    Divider()
-                    categoryContent
+                    if !showsSidebar {
+                        categoryHeader
+                        Divider()
+                    }
+                    categoryContent.id(category)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Color(nsColor: .controlBackgroundColor))
         }
         .frame(minWidth: 420, idealWidth: 760, minHeight: 500, idealHeight: 650)
         .background(SettingsWindowToolbar(onClose: { category = .playback }))
         .overlay(alignment: .top) { SettingsToastOverlay() }
         .noFocusRing()
+        .onReceive(NotificationCenter.default.publisher(for: .showSoundEffectSettings)) { _ in category = .playback }
     }
 
     private var categorySidebar: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("设置")
-                .font(.headline)
-                .padding(.horizontal, 10)
-                .padding(.top, 6)
-                .padding(.bottom, 12)
-
+        VStack(alignment: .leading, spacing: 3) {
             ForEach(SettingsCategory.allCases) { item in
                 Button {
                     category = item
@@ -77,66 +75,57 @@ struct SettingsView: View {
                     HStack(spacing: 9) {
                         Image(systemName: item.icon)
                             .frame(width: 18)
-                        Text(item.title)
+                        Text(item.title).lineLimit(1).minimumScaleFactor(0.9)
                         Spacer(minLength: 0)
                     }
-                    .font(.body.weight(category == item ? .medium : .regular))
-                    .foregroundStyle(category == item ? Theme.accent : .primary)
+                    .font(.system(size: 12.5, weight: category == item ? .medium : .regular))
+                    .foregroundStyle(category == item ? .primary : .secondary)
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 9)
+                    .frame(height: 32)
                     .contentShape(Rectangle())
-                    .background(category == item ? Theme.accent.opacity(0.1) : .clear,
+                    .background(category == item ? Color.primary.opacity(0.06) : .clear,
                                 in: RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("settings-\(item.rawValue)")
                 .noFocusRing()
                 .accessibilityAddTraits(category == item ? .isSelected : [])
             }
             Spacer(minLength: 0)
         }
         .padding(12)
-        .frame(width: 172)
+        .frame(width: 152)
         .frame(maxHeight: .infinity)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private func categoryHeader(showsSidebar: Bool) -> some View {
+    private var categoryHeader: some View {
         HStack {
-            if showsSidebar {
-                Label(category.title, systemImage: category.icon)
-                    .font(.title3.weight(.semibold))
-            } else {
-                // A menu keeps every category reachable without squeezing a sidebar.
-                Picker("设置分类", selection: $category) {
-                    ForEach(SettingsCategory.allCases) { item in
-                        Label(item.title, systemImage: item.icon).tag(item)
-                    }
+            Picker("设置分类", selection: $category) {
+                ForEach(SettingsCategory.allCases) { item in
+                    Label(item.title, systemImage: item.icon).tag(item)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .fixedSize()
-                .accessibilityLabel("设置分类")
             }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .accessibilityLabel("设置分类")
             Spacer()
         }
-        .padding(.horizontal, 20)
-        .frame(height: 58)
+        .padding(.horizontal, 24)
+        .frame(height: 44)
     }
 
     @ViewBuilder
     private var categoryContent: some View {
         switch category {
         case .playback:
-            Form {
-                Section("音质") {
-                    Picker("播放音质", selection: Binding(
+            SettingsForm {
+                SettingsSection("音质") {
+                    SettingsPicker("播放音质", selection: Binding(
                         get: { account.playbackQuality },
                         set: { PlayerService.shared.setAudioQuality($0) }
-                    )) {
-                        ForEach(account.availableAudioQualities) { quality in
-                            Text(quality.displayName).tag(quality)
-                        }
-                    }
+                    ), width: 184, options: account.availableAudioQualities.map { .init(value: $0, title: $0.displayName) })
                     LabeledContent("账号权益", value: account.membershipTier.displayName)
                     if account.isRefreshingMembership {
                         ProgressView().controlSize(.small)
@@ -146,63 +135,42 @@ struct SettingsView: View {
                     if let level = player.servedQuality, let actual = AudioQuality(rawValue: level) {
                         LabeledContent("当前音质", value: actual.displayName)
                     }
-                    switch account.membershipTier {
-                    case .free: settingsHint("黑胶 VIP 可用无损、Hi-Res 与高清臻音。")
-                    case .vip: settingsHint("黑胶 SVIP 可用超清母带与空间音频。")
-                    case .svip: settingsHint("实际音质取决于歌曲资源与输出设备。")
-                    }
                 }
                 .task { await account.refreshMembership() }
 
-                Section("AI 调音大师") {
-                    Toggle("启用 AI 调音", isOn: Binding(
-                        get: { settings.aiSoundEffectEnabled },
-                        set: { player.setAISoundEffectEnabled($0) }
-                    ))
-                    .disabled(account.membershipTier != .svip && !settings.aiSoundEffectEnabled)
-                    if account.membershipTier != .svip {
-                        settingsHint("需要黑胶 SVIP")
-                    } else if settings.aiSoundEffectEnabled {
-                        LabeledContent("调音状态", value: player.aiSoundEffectState.displayName)
-                        HStack {
-                            Text("调音强度")
-                            Spacer(minLength: 12)
-                            Slider(value: Binding(
-                                get: { settings.aiSoundEffectStrength },
-                                set: { player.setAISoundEffectStrength($0) }
-                            ), in: 0...1, step: 0.05)
-                            .frame(maxWidth: 180)
-                            .accessibilityLabel("调音强度")
-                            Text(settings.aiSoundEffectStrength, format: .percent.precision(.fractionLength(0)))
-                                .monospacedDigit()
-                                .frame(width: 42, alignment: .trailing)
-                        }
-                        if player.aiSoundEffectState == .failed {
-                            Button("重试调音") { player.refreshAISoundEffect(retry: true) }
-                        }
-                    }
-                    settingsHint("使用官方逐曲均衡曲线，保留源采样率。混响与空间增强暂不支持。")
-                    settingsHint("耳机已设置均衡器时，可降低调音强度后对比试听。")
-                }
+                SoundEffectSettings()
             }
-            .formStyle(.grouped)
 
         case .appearance:
-            Form {
-                Section("界面") {
-                    Picker("主题", selection: $settings.appearance) {
-                        ForEach(AppAppearance.allCases) { appearance in
-                            Text(appearance.displayName).tag(appearance)
+            SettingsForm {
+                SettingsSection("界面") {
+                    SettingsPicker("语言", selection: $settings.language,
+                                   options: AppLanguage.allCases.map { .init(value: $0, title: $0.displayName) })
+                    .disabled(isRestarting)
+                    if settings.needsLanguageRestart {
+                        HStack {
+                            Text("重启后生效").font(.system(size: 11)).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("重新启动") {
+                                isRestarting = true
+                                Task { @MainActor in
+                                    do { try await AppDelegate.restartApplication() }
+                                    catch {
+                                        isRestarting = false
+                                        ToastCenter.shared.show(String(localized: "无法重新启动，请退出后重新打开 Liltiva。"))
+                                    }
+                                }
+                            }
+                            .disabled(isRestarting)
                         }
                     }
-                    Picker("播放页模式", selection: $settings.nowPlayingMode) {
-                        ForEach(NowPlayingMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
+                    SettingsPicker("主题", selection: $settings.appearance,
+                                   options: AppAppearance.allCases.map { .init(value: $0, title: $0.displayName) })
+                    SettingsPicker("播放页模式", selection: $settings.nowPlayingMode,
+                                   options: NowPlayingMode.allCases.map { .init(value: $0, title: $0.displayName) })
                 }
 
-                Section("背景") {
+                SettingsSection("背景") {
                     Toggle("主界面环境色", isOn: $settings.showMainWindowAmbientBackground)
                     if settings.showMainWindowAmbientBackground {
                         VStack(alignment: .leading, spacing: 8) {
@@ -230,30 +198,23 @@ struct SettingsView: View {
                     }
                 }
             }
-            .formStyle(.grouped)
 
         case .lyrics:
-            Form {
-                Section("歌词显示") {
+            SettingsForm {
+                SettingsSection("歌词显示") {
                     Toggle("显示翻译", isOn: $settings.showLyricsTranslation)
                     Toggle("逐字歌词", isOn: $settings.verbatimLyrics)
-                    Picker("日文歌词读音", selection: $settings.lyricsAnnotation) {
-                        ForEach(LyricsAnnotation.allCases) { annotation in
-                            Text(annotation.displayName).tag(annotation)
-                        }
-                    }
-                    settingsHint("罗马音单独显示一行，汉字读音标在字上方。缺少官方读音时自动生成。")
+                    SettingsPicker("日文歌词读音", selection: $settings.lyricsAnnotation,
+                                   options: LyricsAnnotation.allCases.map { .init(value: $0, title: $0.displayName) })
                 }
 
-                Section("桌面歌词") {
+                SettingsSection("桌面歌词") {
                     Toggle("显示桌面歌词", isOn: $settings.showDesktopLyrics)
                     if settings.showDesktopLyrics {
                         Toggle("水平居中", isOn: $settings.desktopLyricsCentered)
                     }
-                    settingsHint("歌词悬浮在屏幕上，可拖动调整位置。")
                 }
             }
-            .formStyle(.grouped)
 
         case .storage:
             StorageSpaceView {
@@ -264,10 +225,10 @@ struct SettingsView: View {
             ShortcutSettingsView()
 
         case .sync:
-            Form {
+            SettingsForm {
                 SyncSettingsSection()
 
-                Section("账户") {
+                SettingsSection("账户") {
                     if let profile = account.profile {
                         LabeledContent("当前账户", value: profile.nickname)
                         Button("退出登录", role: .destructive) {
@@ -282,16 +243,14 @@ struct SettingsView: View {
                     }
                 }
             }
-            .formStyle(.grouped)
 
         case .about:
-            Form {
-                Section("Liltiva") {
+            SettingsForm {
+                SettingsSection("Liltiva") {
                     LabeledContent("版本", value: appVersion)
                     settingsHint("网易云音乐第三方客户端。数据来自网易云音乐。")
                 }
             }
-            .formStyle(.grouped)
         }
     }
 

@@ -9,7 +9,16 @@ enum NCAEContainer {
     static let maximumPackageBytes = 1_048_576
     static let maximumJSONBytes = 2_097_152
 
+    enum MaterialKind: Int { case parameters = 1, impulse = 2 }
+    struct Material { let kind: MaterialKind; let data: Data }
+
     static func decode(_ data: Data) throws -> Data {
+        let material = try decodeMaterial(data)
+        guard material.kind == .parameters else { throw DecodingError.unsupportedVersion }
+        return material.data
+    }
+
+    static func decodeMaterial(_ data: Data) throws -> Material {
         guard data.count <= maximumPackageBytes else { throw DecodingError.tooLarge }
         let bytes = [UInt8](data)
         guard bytes.count >= 22, Array(bytes.prefix(4)) == Array("NCAE".utf8) else {
@@ -17,7 +26,7 @@ enum NCAEContainer {
         }
         let version = Int(bytes[12]) | Int(bytes[13]) << 8
         let type = Int(bytes[14]) | Int(bytes[15]) << 8
-        guard version == 1, type == 1 else { throw DecodingError.unsupportedVersion }
+        guard version == 1, let kind = MaterialKind(rawValue: type) else { throw DecodingError.unsupportedVersion }
         let length = (0..<4).reduce(0) { $0 | Int(bytes[4 + $1]) << (8 * $1) }
         let keyCount = Int(bytes[16])
         let payloadStart = 17 + keyCount
@@ -48,7 +57,7 @@ enum NCAEContainer {
                 output[offset] = bytes[payloadStart + offset] ^ stream
             }
         }
-        return try inflate(compressed)
+        return Material(kind: kind, data: try inflate(compressed))
     }
 
     private static func inflate(_ data: Data) throws -> Data {

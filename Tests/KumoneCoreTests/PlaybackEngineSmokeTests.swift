@@ -856,10 +856,10 @@ struct PlaybackEngineSmokeTests {
         final class Recorder: @unchecked Sendable {
             private let lock = NSLock()
             private var samples: [Sample] = []
-            let start = Date()
-            func record(_ peak: Float) {
+            let start = AVAudioTime.seconds(forHostTime: mach_absolute_time())
+            func record(_ peak: Float, at time: TimeInterval) {
                 lock.lock(); defer { lock.unlock() }
-                samples.append(Sample(t: Date().timeIntervalSince(start), peak: peak))
+                samples.append(Sample(t: time - start, peak: peak))
             }
             func snapshot() -> [Sample] {
                 lock.lock(); defer { lock.unlock() }
@@ -875,16 +875,16 @@ struct PlaybackEngineSmokeTests {
                 () -> ([Sample], TimeInterval, TimeInterval, Float) in
                 let engine = PlaybackEngine()
                 _ = EventLog(engine)
-                defer { engine.setOutputMonitor(nil); engine.stop() }
+                defer { engine.setTimedOutputMonitor(nil); engine.stop() }
                 guard (try? engine.loadFile(at: fixture)) != nil else { return ([], -1, -1, -1) }
                 engine.outputVolume = 0
                 let recorder = Recorder()
-                engine.setOutputMonitor { recorder.record($0) }
+                engine.setTimedOutputMonitor { recorder.record($0, at: $1) }
                 engine.play(from: 0)
                 // Sounding at full level well inside the loud half.
                 _ = pollPosition(engine, past: 1.0, timeout: 5)
 
-                let seekAt = Date().timeIntervalSince(recorder.start)
+                let seekAt = AVAudioTime.seconds(forHostTime: mach_absolute_time()) - recorder.start
                 engine.seek(to: 5.0)
                 Thread.sleep(forTimeInterval: 1.2)
                 // The fader has to come back on its own, or "no leak" would be

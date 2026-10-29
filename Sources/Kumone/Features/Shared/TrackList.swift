@@ -150,6 +150,7 @@ struct TrackRow: View {
                 .fill(isHovering ? Color.primary.opacity(0.06) : .clear)
         )
         .contentShape(Rectangle())
+        .background(TrackActivationTarget(activate: playSelectedTrack))
         .onHover { hovering in
             // Scrolling moves many rows beneath the pointer. Avoid starting a
             // new implicit animation for every row crossed during a scroll.

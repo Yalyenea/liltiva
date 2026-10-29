@@ -1,5 +1,26 @@
 import SwiftUI
 
+enum AppLanguage: String, CaseIterable, Identifiable {
+    case system, simplifiedChinese = "zh-Hans", english = "en"
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .system: return String(localized: "跟随系统")
+        case .simplifiedChinese: return "简体中文"
+        case .english: return "English"
+        }
+    }
+
+    func persist(to defaults: UserDefaults) {
+        defaults.set(rawValue, forKey: SettingsManager.Keys.language)
+        // The app-specific AppleLanguages override is read at the next launch,
+        // covering Foundation strings, SwiftUI views, and native AppKit menus.
+        if self == .system { defaults.removeObject(forKey: "AppleLanguages") }
+        else { defaults.set([rawValue], forKey: "AppleLanguages") }
+    }
+}
+
 enum AppAppearance: String, CaseIterable, Identifiable {
     case auto, light, dark
 
@@ -50,7 +71,7 @@ public enum NowPlayingMode: String, CaseIterable, Identifiable {
         switch self {
         case .vinyl: return String(localized: "黑胶模式")
         case .classic: return String(localized: "经典模式")
-        case .lyrics: return String(localized: "全歌词")
+        case .lyrics: return String(localized: "歌词模式")
         }
     }
 }
@@ -64,8 +85,12 @@ final class SettingsManager: ObservableObject {
     /// the key the same way.
     enum Keys {
         static let quality = "settings.audioQuality"
+        static let language = "settings.language"
         static let aiSoundEffect = "settings.aiSoundEffect"
         static let aiSoundEffectStrength = "settings.aiSoundEffectStrength"
+        static let soundEffectMode = "settings.soundEffectMode"
+        static let soundEffectPreset = "settings.soundEffectPreset"
+        static let aiTuningPreferences = "settings.aiTuningPreferences"
         static let appearance = "settings.appearance"
         static let nowPlayingMode = "settings.nowPlayingMode"
         static let transparentPlayback = "settings.transparentPlayback"
@@ -88,12 +113,26 @@ final class SettingsManager: ObservableObject {
         static let audioCacheAutomatic = "settings.audioCacheAutomatic"
     }
 
+    @Published var language: AppLanguage {
+        didSet { language.persist(to: .standard) }
+    }
+    private let launchLanguage: AppLanguage
+    var needsLanguageRestart: Bool { language != launchLanguage }
+
     @Published var audioQuality: AudioQuality {
         didSet { UserDefaults.standard.set(audioQuality.rawValue, forKey: Keys.quality) }
     }
 
-    @Published var aiSoundEffectEnabled: Bool {
-        didSet { UserDefaults.standard.set(aiSoundEffectEnabled, forKey: Keys.aiSoundEffect) }
+    @Published var soundEffectMode: SoundEffectMode {
+        didSet {
+            UserDefaults.standard.set(soundEffectMode.rawValue, forKey: Keys.soundEffectMode)
+        }
+    }
+    @Published var soundEffectPresetID: Int {
+        didSet { UserDefaults.standard.set(soundEffectPresetID, forKey: Keys.soundEffectPreset) }
+    }
+    @Published var aiTuningPreferences: Set<AITuningPreference> {
+        didSet { UserDefaults.standard.set(aiTuningPreferences.map(\.rawValue).sorted(), forKey: Keys.aiTuningPreferences) }
     }
     @Published var aiSoundEffectStrength: Double {
         didSet { UserDefaults.standard.set(aiSoundEffectStrength, forKey: Keys.aiSoundEffectStrength) }
@@ -231,8 +270,14 @@ final class SettingsManager: ObservableObject {
     }
     private init() {
         let defaults = UserDefaults.standard
+        let language = defaults.string(forKey: Keys.language).flatMap(AppLanguage.init) ?? .system
+        self.language = language
+        launchLanguage = language
         audioQuality = defaults.string(forKey: Keys.quality).flatMap(AudioQuality.init) ?? .exhigh
-        aiSoundEffectEnabled = defaults.bool(forKey: Keys.aiSoundEffect)
+        soundEffectMode = defaults.string(forKey: Keys.soundEffectMode).flatMap(SoundEffectMode.init)
+            ?? (defaults.bool(forKey: Keys.aiSoundEffect) ? .aiMaster : .off)
+        soundEffectPresetID = defaults.object(forKey: Keys.soundEffectPreset) as? Int ?? 3592428
+        aiTuningPreferences = Set((defaults.stringArray(forKey: Keys.aiTuningPreferences) ?? []).compactMap(AITuningPreference.init))
         let effectStrength = defaults.object(forKey: Keys.aiSoundEffectStrength) as? Double ?? 1
         aiSoundEffectStrength = effectStrength.isFinite ? min(1, max(0, effectStrength)) : 1
         enableAudioCache = defaults.object(forKey: Keys.enableAudioCache) as? Bool ?? true
@@ -251,8 +296,12 @@ final class SettingsManager: ObservableObject {
             ?? Self.defaultPlaybackTransparency
         playbackTransparency = min(max(storedPlaybackTransparency, Self.playbackTransparencyRange.lowerBound),
                                    Self.playbackTransparencyRange.upperBound)
-        pinnedNavigationPages = (defaults.stringArray(forKey: Keys.pinnedNavigationPages) ?? [])
-            .compactMap(RootPage.init(rawValue:))
+        let storedPins = defaults.stringArray(forKey: Keys.pinnedNavigationPages) ?? []
+        let restoredPins = RootPage.restoredPinnedPages(storedPins)
+        pinnedNavigationPages = restoredPins
+        if storedPins != restoredPins.map(\.rawValue) {
+            defaults.set(restoredPins.map(\.rawValue), forKey: Keys.pinnedNavigationPages)
+        }
         showLyricsTranslation = defaults.object(forKey: Keys.showTranslation) as? Bool ?? true
         // Carry over the old on/off romaji toggle for anyone who had it on.
         lyricsAnnotation = defaults.string(forKey: Keys.annotation).flatMap(LyricsAnnotation.init)

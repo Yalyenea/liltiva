@@ -161,3 +161,84 @@ struct AISoundEffectRequestTests {
         #expect(try await store.effect(songID: 491107880, accountID: 2, offline: true) == nil)
     }
 }
+
+extension AISoundEffectRequestTests {
+    @Test func catalogUsesCurrentOfficialNamesMaterialsAndEntitlements() async throws {
+        let (client, assets) = sessions()
+        defer { assets.invalidateAndCancel(); SoundEffectProtocol.handler = nil }
+        SoundEffectProtocol.handler = { request in
+            #expect(request.url?.path == "/weapi/usertool/sound/queryAllSound")
+            return (200, Data(#"{"code":200,"data":[{"id":3592428,"name":"3D环绕","vipAuthRespItem":{"interestsVipType":0,"authResult":{"canUse":true}},"soundMaterialList":[{"size":100,"md5":"00000000000000000000000000000000","link":"http://d1.music.126.net/effect.ncae"}]},{"id":3592400,"name":"8D环绕","vipAuthRespItem":{"interestsVipType":15,"authResult":{"canUse":true}},"soundMaterialList":[{"size":100,"md5":"00000000000000000000000000000000","link":"http://d1.music.126.net/effect.ncae"}]}]}"#.utf8))
+        }
+        let catalog = try await NeteaseAPI.soundEffectCatalog(using: client)
+        #expect(catalog.count == 2)
+        #expect(catalog[0].canUse(tier: .free))
+        #expect(!catalog[1].canUse(tier: .vip))
+        #expect(catalog[1].canUse(tier: .svip))
+        #expect(SoundEffectMode.aiMaster.minimumMembership == .svip)
+        #expect(SoundEffectMode.smart.minimumMembership == .vip)
+    }
+
+    @Test func permissionDenialAndAccountChangesDoNotGrantEffects() async throws {
+        let (client, assets) = sessions()
+        defer { assets.invalidateAndCancel(); SoundEffectProtocol.handler = nil }
+        SoundEffectProtocol.handler = { request in
+            #expect(request.url?.path == "/weapi/vipauth/app/interests/auth/query")
+            return (200, Data(#"{"code":200,"data":[{"interestsId":200,"authResp":{"interestsVipType":6,"authResult":{"canUse":false}}}]}"#.utf8))
+        }
+        #expect(try await !NeteaseAPI.soundEffectAuthorized(id: 200, special: true, using: client))
+        SoundEffectProtocol.handler = { _ in
+            client.setCookies(["MUSIC_U": "test-account-b"])
+            return (200, Data(#"{"code":200,"data":[]}"#.utf8))
+        }
+        await #expect(throws: (any Error).self) { _ = try await NeteaseAPI.soundEffectCatalog(using: client) }
+    }
+
+    @Test func cachedSmartEffectCannotCrossAccountsOrOutliveMembership() async throws {
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent(".tmp/sound-cache-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let account = directory.appendingPathComponent("1")
+        try FileManager.default.createDirectory(at: account, withIntermediateDirectories: true)
+        struct Cached: Encodable { let date: Date; let value: AISoundEffect }
+        let effect = try AISoundEffect.decode(package: effectFixture())
+        try JSONEncoder().encode(Cached(date: .now, value: effect)).write(to: account.appendingPathComponent("smart-123.json"))
+        let store = SoundEffectStore(directory: directory), (client, assets) = sessions()
+        defer { assets.invalidateAndCancel() }
+        #expect(try await store.effect(mode: .smart, presetID: 0, songID: 123, accountID: 1, tier: .vip, offline: true, client: client) == effect)
+        #expect(try await store.effect(mode: .smart, presetID: 0, songID: 123, accountID: 2, tier: .svip, offline: true, client: client) == nil)
+        await #expect(throws: SoundEffectError.unauthorized) {
+            _ = try await store.effect(mode: .smart, presetID: 0, songID: 123, accountID: 1, tier: .free, offline: true, client: client)
+        }
+    }
+}
+
+extension AISoundEffectRequestTests {
+    @Test func smartSelectionFetchesVerifiedBankAndUsesExactlyTheReturnedKey() async throws {
+        let (client, assets) = sessions()
+        defer { assets.invalidateAndCancel(); SoundEffectProtocol.handler = nil }
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent(".tmp/smart-request-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bank = try effectFixture("effect-smart")
+        var key = "1"
+        SoundEffectProtocol.handler = { request in
+            if request.url?.host == "d2.music.126.net" {
+                #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+                return (200, bank)
+            }
+            if request.url?.path.hasSuffix("/vipauth/app/interests/auth/query") == true {
+                return (200, Data(#"{"code":200,"data":[{"interestsId":200,"authResp":{"interestsVipType":6,"authResult":{"canUse":true}}}]}"#.utf8))
+            }
+            #expect(request.url?.path == "/weapi/usertool/smart/sound/get")
+            return (200, try JSONSerialization.data(withJSONObject: ["code": 200, "data": ["soundKey": key]]))
+        }
+        let store = SoundEffectStore(directory: directory, assets: assets)
+        let effect = try await store.effect(mode: .smart, presetID: 0, songID: 123, accountID: 1,
+                                            tier: .vip, offline: false, client: client)
+        #expect(effect?.aev2.eq.eqs == [-1, -0.6, 0, 0, 0, 1, 1.8, 2.8, 1.8, -1])
+        key = "unknown-genre"
+        #expect(try await store.effect(mode: .smart, presetID: 0, songID: 124, accountID: 1,
+                                       tier: .vip, offline: false, client: client) == nil)
+    }
+}

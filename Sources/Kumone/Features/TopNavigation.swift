@@ -175,7 +175,7 @@ struct TopNavigationBar: View {
         Button {
             selection = page
         } label: {
-            Text(page.title)
+            Text(page.tabTitle)
                 .font(.system(size: 13, weight: selection == page ? .semibold : .medium))
                 .foregroundStyle(selection == page ? .primary : .secondary)
                 .frame(height: 26)
@@ -187,6 +187,7 @@ struct TopNavigationBar: View {
             ? KeyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
             : nil)
         .help(Text(page.title) + Text(index < 9 ? "  ⌘\(index + 1)" : ""))
+        .accessibilityLabel(page.title)
         .accessibilityAddTraits(selection == page ? .isSelected : [])
     }
 }
@@ -300,7 +301,8 @@ struct ToolbarSearchField: View {
     @State private var text = ""
     @State private var placeholder = String(localized: "搜索音乐、歌手、专辑")
     @State private var placeholderQuery = ""
-    @FocusState private var focused: Bool
+    @State private var focusRequest = 0
+    @ObservedObject private var shortcuts = ShortcutManager.shared
 
     var body: some View {
         HStack(spacing: 0) {
@@ -308,11 +310,7 @@ struct ToolbarSearchField: View {
                 if expanded {
                     collapse()
                 } else {
-                    withAnimation(.easeInOut(duration: 0.24), completionCriteria: .logicallyComplete) {
-                        expanded = true
-                    } completion: {
-                        focused = expanded
-                    }
+                    focusSearch()
                 }
             } label: {
                 Image(systemName: "magnifyingglass")
@@ -323,33 +321,27 @@ struct ToolbarSearchField: View {
             }
             .buttonStyle(.plain)
             .noFocusRing()
-            .help(expanded ? "收起搜索" : "搜索")
+            .help(Text(expanded ? String(localized: "收起搜索") : String(localized: "全局搜索"))
+                  + Text("  \(shortcuts.shortcut(for: .searchLibrary).displayString)"))
             .accessibilityLabel(expanded ? "收起搜索" : "搜索")
 
-            TextField(placeholder, text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12.5))
-                .focused($focused)
-                .frame(minWidth: 0)
-                .opacity(expanded ? 1 : 0)
-                .disabled(!expanded)
-                .accessibilityHidden(!expanded)
-                .accessibilityLabel("搜索音乐、歌手、专辑")
-                .onSubmit {
+            ShortcutSearchField(text: $text, placeholder: placeholder, focusRequest: focusRequest,
+                onSubmit: {
                     let query = text.trimmingCharacters(in: .whitespaces)
                     let effective = query.isEmpty ? placeholderQuery : query
                     if !effective.isEmpty { onSubmit(effective) }
                     collapse()
-                }
-                .onExitCommand { collapse() }
-                .onChange(of: focused) { _, isFocused in
-                    if !isFocused, text.isEmpty { collapse() }
-                }
+                }, onExit: collapse)
+                .frame(minWidth: 0)
+                .opacity(expanded ? 1 : 0)
+                .disabled(!expanded)
+                .accessibilityHidden(!expanded)
         }
         .padding(.trailing, expanded ? 10 : 0)
         .frame(width: expanded ? expandedWidth : 24, height: 26)
         .background(.primary.opacity(expanded ? 0.06 : 0), in: Capsule())
         .clipShape(Capsule())
+        .onReceive(NotificationCenter.default.publisher(for: .focusLibrarySearch)) { _ in focusSearch() }
         .task {
             if let keyword = try? await NeteaseAPI.searchDefaultKeyword(), !keyword.isEmpty {
                 placeholder = keyword
@@ -361,7 +353,15 @@ struct ToolbarSearchField: View {
     private func collapse() {
         withAnimation(.easeInOut(duration: 0.24)) { expanded = false }
         text = ""
-        focused = false
+        AppDelegate.shared?.mainWindow?.makeFirstResponder(nil)
+    }
+
+    private func focusSearch() {
+        withAnimation(.easeInOut(duration: 0.24), completionCriteria: .logicallyComplete) {
+            expanded = true
+        } completion: {
+            if expanded { focusRequest += 1 }
+        }
     }
 }
 

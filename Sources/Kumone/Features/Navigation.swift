@@ -79,13 +79,12 @@ enum RootPage: String, Identifiable {
     case recents
     case collections
     case cloud
-    case saved
     case profile, messages
 
     var id: String { rawValue }
 
     static let primaryPages: [RootPage] = [.home, .likedSongs, .daily, .created]
-    static let menuPages: [RootPage] = [.profile, .messages, .explore, .fm, .downloaded, .recents, .collections, .cloud, .saved]
+    static let menuPages: [RootPage] = [.profile, .messages, .explore, .fm, .downloaded, .recents, .collections, .cloud]
 
     var requiresLogin: Bool {
         switch self {
@@ -106,9 +105,23 @@ enum RootPage: String, Identifiable {
         case .recents: return "最近播放"
         case .collections: return "我的收藏"
         case .cloud: return "音乐云盘"
-        case .saved: return "收藏的歌单"
         case .profile: return "个人主页"
         case .messages: return "消息中心"
+        }
+    }
+
+    /// Keep compact tab labels separate from full page names and tooltips.
+    var tabTitle: LocalizedStringKey {
+        switch self {
+        case .likedSongs: return "navigation.tab.liked"
+        case .created: return "navigation.tab.created"
+        case .downloaded: return "navigation.tab.downloaded"
+        case .recents: return "navigation.tab.recents"
+        case .collections: return "navigation.tab.collections"
+        case .cloud: return "navigation.tab.cloud"
+        case .profile: return "navigation.tab.profile"
+        case .messages: return "navigation.tab.messages"
+        default: return title
         }
     }
 
@@ -124,7 +137,6 @@ enum RootPage: String, Identifiable {
         case .recents: return "clock"
         case .collections: return "star"
         case .cloud: return "icloud"
-        case .saved: return "rectangle.stack"
         case .profile: return "person.crop.circle"
         case .messages: return "bell"
         }
@@ -137,6 +149,19 @@ enum RootPage: String, Identifiable {
         } else {
             pages.append(self)
         }
+    }
+
+    static func restoredPinnedPages(_ rawValues: [String]) -> [RootPage] {
+        var pages: [RootPage] = []
+        for rawValue in rawValues {
+            // Merge the retired saved-playlist tab without losing its position
+            // or producing a second Collections tab when both were pinned.
+            let migrated = rawValue == "saved" ? "collections" : rawValue
+            guard let page = RootPage(rawValue: migrated), menuPages.contains(page),
+                  !pages.contains(page) else { continue }
+            pages.append(page)
+        }
+        return pages
     }
 }
 
@@ -206,6 +231,7 @@ struct NavigationActions {
     let canGoForward: Bool
     let back: () -> Void
     let forward: () -> Void
+    var canSearchPlaylist = false
 }
 
 private struct NavigationActionsKey: FocusedValueKey {
@@ -221,6 +247,7 @@ extension FocusedValues {
 
 struct NavigationCommands: Commands {
     @FocusedValue(\.navigationActions) private var actions
+    @ObservedObject private var shortcuts = ShortcutManager.shared
 
     var body: some Commands {
         CommandGroup(after: .toolbar) {
@@ -231,6 +258,19 @@ struct NavigationCommands: Commands {
             Button("前进") { actions?.forward() }
                 .keyboardShortcut("]", modifiers: .command)
                 .disabled(actions?.canGoForward != true)
+            Divider()
+            Button("全局搜索") { shortcuts.executeAction(.searchLibrary) }
+                .keyboardShortcut(shortcuts.shortcut(for: .searchLibrary).menuShortcut)
+                .disabled(actions == nil)
+            Button("搜索歌单内歌曲") { shortcuts.executeAction(.searchPlaylist) }
+                .keyboardShortcut(shortcuts.shortcut(for: .searchPlaylist).menuShortcut)
+                .disabled(actions?.canSearchPlaylist != true)
+            Divider()
+            ForEach([ShortcutAction.selectPreviousRow, .selectNextRow, .playSelectedRow]) { action in
+                Button(action.displayName) { shortcuts.executeAction(action) }
+                    .keyboardShortcut(shortcuts.shortcut(for: action).menuShortcut)
+                    .disabled(actions == nil)
+            }
         }
     }
 }

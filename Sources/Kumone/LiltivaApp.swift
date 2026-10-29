@@ -38,18 +38,24 @@ public struct LiltivaApp: App {
                 .disabled(!player.hasCurrentTrack)
 
                 Button("下一首") { player.next() }
-                    .keyboardShortcut(shortcuts.shortcut(for: .nextTrack).keyboardShortcut)
+                    .keyboardShortcut(shortcuts.shortcut(for: .nextTrack).menuShortcut)
                 Button("上一首") { player.previous() }
-                    .keyboardShortcut(shortcuts.shortcut(for: .previousTrack).keyboardShortcut)
+                    .keyboardShortcut(shortcuts.shortcut(for: .previousTrack).menuShortcut)
 
                 Divider()
 
                 Button("播放模式") { player.cyclePlaybackMode() }
-                    .keyboardShortcut(shortcuts.shortcut(for: .cycleRepeatMode).keyboardShortcut)
+                    .keyboardShortcut(shortcuts.shortcut(for: .cycleRepeatMode).menuShortcut)
 
                 Divider()
 
                 SleepTimerMenu(player: player)
+
+                Divider()
+                ForEach([ShortcutAction.seekBackward, .seekForward, .toggleMute, .volumeDown, .volumeUp]) { action in
+                    Button(action.displayName) { shortcuts.executeAction(action) }
+                        .keyboardShortcut(shortcuts.shortcut(for: action).menuShortcut)
+                }
 
                 Divider()
 
@@ -58,18 +64,22 @@ public struct LiltivaApp: App {
                         Task { await account.toggleLike(trackID: track.id) }
                     }
                 }
-                .keyboardShortcut(shortcuts.shortcut(for: .toggleLike).keyboardShortcut)
+                .keyboardShortcut(shortcuts.shortcut(for: .toggleLike).menuShortcut)
                 .disabled(!player.hasCurrentTrack)
 
                 Button("歌词") {
                     player.activePanel = player.activePanel == .lyrics ? nil : .lyrics
                 }
-                .keyboardShortcut(shortcuts.shortcut(for: .toggleLyrics).keyboardShortcut)
+                .keyboardShortcut(shortcuts.shortcut(for: .toggleLyrics).menuShortcut)
 
                 Button("播放队列") {
                     player.activePanel = player.activePanel == .queue ? nil : .queue
                 }
-                .keyboardShortcut(shortcuts.shortcut(for: .toggleQueue).keyboardShortcut)
+                .keyboardShortcut(shortcuts.shortcut(for: .toggleQueue).menuShortcut)
+                ForEach([ShortcutAction.toggleNowPlaying, .toggleDesktopLyrics]) { action in
+                    Button(action.displayName) { shortcuts.executeAction(action) }
+                        .keyboardShortcut(shortcuts.shortcut(for: action).menuShortcut)
+                }
             }
 
         }
@@ -127,11 +137,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PlaybackStateStorage.flush()
     }
 
+    @MainActor
+    static func restartApplication() async throws {
+        PlayerService.shared.checkpointPlayback()
+        PlaybackStateStorage.flush()
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        // Keep this instance available if launching the replacement fails.
+        _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
+        NSApp.terminate(nil)
+    }
+
     /// Deliver recording input before playback shortcuts or menu key equivalents consume it.
     @MainActor
     static func interceptKeyEvent(_ event: NSEvent) -> NSEvent? {
         if let recorder = event.window?.firstResponder as? ShortcutRecorderView.RecorderNSView {
             recorder.keyDown(with: event)
+            return nil
+        }
+        // The active search owns Escape before playback panels underneath it.
+        if event.keyCode == 53,
+           event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+           let editor = event.window?.firstResponder as? NSTextView,
+           let field = editor.delegate as? ShortcutSearchField.Field {
+            field.exit?()
             return nil
         }
         // Dismiss the topmost playback surface before its underlying page.

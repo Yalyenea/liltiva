@@ -274,9 +274,8 @@ struct PlaylistDetailView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                TextField("搜索歌单内歌曲", text: $model.filter)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                ShortcutSearchField(text: $model.filter, placeholder: String(localized: "搜索歌单内歌曲"),
+                                    isPlaylistSearch: true)
                     .frame(minWidth: 100)
             }
             .padding(.horizontal, 10)

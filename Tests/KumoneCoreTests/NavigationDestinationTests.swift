@@ -23,15 +23,15 @@ struct NavigationDestinationTests {
 
     @Test func menuPagesCanBePinnedAndUnpinnedInOrder() {
         var pages: [RootPage] = []
-        RootPage.saved.togglePin(in: &pages)
+        RootPage.collections.togglePin(in: &pages)
         RootPage.explore.togglePin(in: &pages)
-        #expect(pages == [.saved, .explore])
+        #expect(pages == [.collections, .explore])
         #expect(pages.map(\.rawValue).compactMap(RootPage.init(rawValue:)) == pages)
 
-        RootPage.saved.togglePin(in: &pages)
+        RootPage.collections.togglePin(in: &pages)
         #expect(pages == [.explore])
-        RootPage.saved.togglePin(in: &pages)
-        #expect(pages == [.explore, .saved])
+        RootPage.collections.togglePin(in: &pages)
+        #expect(pages == [.explore, .collections])
     }
 
     @Test func primaryTabsCannotBeDuplicatedByPinning() {
@@ -40,8 +40,17 @@ struct NavigationDestinationTests {
             page.togglePin(in: &pages)
         }
         #expect(pages.isEmpty)
-        #expect(RootPage.menuPages.contains(.saved))
+        #expect(RootPage.menuPages.contains(.collections))
         #expect(!RootPage.menuPages.contains(.created))
+    }
+
+    @Test func savedPlaylistPinsMigrateToOneCollectionEntryInOrder() {
+        #expect(RootPage.restoredPinnedPages(["profile", "saved", "cloud", "collections"]) == [.profile, .collections, .cloud])
+        #expect(RootPage.restoredPinnedPages(["collections", "saved", "messages"]) == [.collections, .messages])
+        #expect(RootPage.restoredPinnedPages(["saved"]) == [.collections])
+        #expect(RootPage.restoredPinnedPages(["home", "unknown", "cloud", "cloud"]) == [.cloud])
+        #expect(RootPage(rawValue: "saved") == nil)
+        #expect(RootPage.menuPages.filter { $0 == .collections }.count == 1)
     }
 
     @Test func navigationContentFitsItsReservedSpace() {

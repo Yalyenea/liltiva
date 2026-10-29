@@ -10,7 +10,7 @@ struct SyncSettingsSection: View {
     private var errorMessage: String? { connectionError ?? sync.errorMessage }
 
     var body: some View {
-        Section("iCloud") {
+        SettingsSection("iCloud") {
             VStack(alignment: .leading, spacing: 6) {
                 Toggle("同步", isOn: Binding(
                     get: { sync.enabled },
@@ -25,9 +25,6 @@ struct SyncSettingsSection: View {
                         }
                     }
                 ))
-                Text("在设备间接续播放，同步设置")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             if sync.enabled {
                 Toggle("登录同步", isOn: Binding(

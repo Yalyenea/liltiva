@@ -171,19 +171,7 @@ struct PlayerBar: View {
                 Text("当前音质：\(quality.displayName)")
             }
             Divider()
-            Toggle("AI 调音大师", isOn: Binding(
-                get: { settings.aiSoundEffectEnabled },
-                set: { player.setAISoundEffectEnabled($0) }
-            ))
-            .disabled(account.membershipTier != .svip && !settings.aiSoundEffectEnabled)
-            if settings.aiSoundEffectEnabled {
-                Text(player.aiSoundEffectState.displayName)
-                if player.aiSoundEffectState == .failed {
-                    Button("重试调音") { player.refreshAISoundEffect(retry: true) }
-                }
-            } else if account.membershipTier != .svip {
-                Text("需要黑胶 SVIP")
-            }
+            SoundEffectMenu()
         } label: {
             Group {
                 if showsTitle {
@@ -198,6 +186,7 @@ struct PlayerBar: View {
             .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
+        .onAppear { player.loadSoundEffectCatalog() }
         .menuIndicator(.hidden)
         .fixedSize()
         .controlHint(String(localized: "播放音质"))

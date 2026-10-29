@@ -143,7 +143,7 @@ final class TonearmMotionController {
         rotation = Self.zRotation(engaged: engaged, progress: progress)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer.setValue(rotation, forKeyPath: "transform.rotation.z")
+        layer.setValue(rotation, forKeyPath: "sublayerTransform.rotation.z")
         CATransaction.commit()
     }
 
@@ -153,17 +153,17 @@ final class TonearmMotionController {
         rotation = target
         // Retarget from what is on screen, not from the model: a drag released
         // mid-swing must reverse smoothly rather than jump to the far end.
-        let from = layer.presentation()?.value(forKeyPath: "transform.rotation.z") as? Double
-            ?? layer.value(forKeyPath: "transform.rotation.z") as? Double ?? 0
+        let from = layer.presentation()?.value(forKeyPath: "sublayerTransform.rotation.z") as? Double
+            ?? layer.value(forKeyPath: "sublayerTransform.rotation.z") as? Double ?? 0
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer.setValue(target, forKeyPath: "transform.rotation.z")
+        layer.setValue(target, forKeyPath: "sublayerTransform.rotation.z")
         CATransaction.commit()
         layer.removeAnimation(forKey: "tonearm-engage")
         guard animated else { return }
         // CASpringAnimation parameters converted from the SwiftUI spring this
         // replaces (response 0.48, damping fraction 0.74, mass 1).
-        let spring = CASpringAnimation(keyPath: "transform.rotation.z")
+        let spring = CASpringAnimation(keyPath: "sublayerTransform.rotation.z")
         spring.mass = 1
         spring.stiffness = 171.5
         spring.damping = 19.4
@@ -190,7 +190,7 @@ final class TonearmMotionController {
         let values = (0..<samples).map { index in
             -VinylTonearmView.wobbleDegrees(at: Double(index) * step) * .pi / 180
         }
-        let animation = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        let animation = CAKeyframeAnimation(keyPath: "sublayerTransform.rotation.z")
         animation.values = values
         animation.duration = period
         animation.repeatCount = .infinity
@@ -256,11 +256,10 @@ private struct EngagingTonearm<Content: View>: PlatformViewRepresentable {
     }
 }
 
-/// Holds the arm inside a stage whose origin sits *on the arm's pivot*: AppKit
-/// anchors a view's backing layer at its origin, so the pivot is placed at the
-/// stage's origin and the arm at negative coordinates — the layer rotation
-/// then swings the arm around that point instead of the stage's corner.
-private final class TonearmHost<Content: View>: NSView {
+/// Holds the arm with its pivot at the stage origin. Rotate only the hosted
+/// contents: AppKit owns the backing layer's transform and resets it during
+/// layout, which otherwise leaves a paused arm resting on the record.
+final class TonearmHost<Content: View>: NSView {
     private let arm: NSHostingView<Content>
     private let stage = NSView()
     private var width: CGFloat

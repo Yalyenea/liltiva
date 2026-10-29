@@ -1,15 +1,16 @@
 import SwiftUI
 
-/// 我的收藏 — liked albums and followed artists.
+/// Saved playlists, liked albums, and followed artists share one library entry.
 struct CollectionsView: View {
     private enum Tab: String, CaseIterable, Identifiable {
+        case playlists = "歌单"
         case albums = "专辑"
         case artists = "歌手"
 
         var id: String { rawValue }
     }
 
-    @State private var tab: Tab = .albums
+    @State private var tab: Tab = .playlists
     @State private var isLoading = true
 
     @EnvironmentObject private var account: AccountStore
@@ -17,22 +18,41 @@ struct CollectionsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Picker("", selection: $tab) {
+                Picker("收藏分类", selection: $tab) {
                     ForEach(Tab.allCases) { tab in
                         Text(LocalizedStringKey(tab.rawValue)).tag(tab)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 180)
+                .frame(width: 216)
                 .padding(.horizontal, Theme.Layout.contentInset)
                 .padding(.top, 12)
 
-                if isLoading, account.likedAlbums.isEmpty, account.likedArtists.isEmpty {
+                if isSelectedTabLoading {
                     ProgressView()
                         .frame(maxWidth: .infinity, minHeight: 300)
                 } else {
                     switch tab {
+                    case .playlists:
+                        if account.subscribedPlaylists.isEmpty {
+                            EmptyStateView(icon: "rectangle.stack", title: "还没有收藏歌单")
+                                .frame(minHeight: 300)
+                        } else {
+                            CardGrid {
+                                ForEach(account.subscribedPlaylists) { playlist in
+                                    NavigationLink(value: Destination.playlist(playlist.id)) {
+                                        CoverCardBody(
+                                            coverURL: playlist.coverURL?.resizedImageURL(384),
+                                            title: playlist.name,
+                                            subtitle: String(localized: "\(playlist.trackCount) 首")
+                                        )
+                                    }
+                                    .buttonStyle(.interactiveCard)
+                                }
+                            }
+                            .padding(.horizontal, Theme.Layout.contentInset)
+                        }
                     case .albums:
                         if account.likedAlbums.isEmpty {
                             EmptyStateView(icon: "square.stack", title: "还没有收藏专辑")
@@ -86,6 +106,14 @@ struct CollectionsView: View {
         .task {
             await account.refreshSublists()
             isLoading = false
+        }
+    }
+
+    private var isSelectedTabLoading: Bool {
+        switch tab {
+        case .playlists: return !account.isBootstrapped && account.subscribedPlaylists.isEmpty
+        case .albums: return isLoading && account.likedAlbums.isEmpty
+        case .artists: return isLoading && account.likedArtists.isEmpty
         }
     }
 }

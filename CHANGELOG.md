@@ -13,10 +13,16 @@
 
 - **macOS**: add personal profiles with playlists, following, followers, posts, a following feed and listening charts, plus a message center for private-message history, comments, mentions, notifications and unread counts; paged data stays isolated to the signed-in account.
 - **macOS**: expand playback quality choices according to active VIP and SVIP benefits, including Hi-Res, master and spatial formats; use native playback for high-resolution and spatial sources and apply the eligible quality to downloads.
-- **macOS**: add SVIP AI tuning with independently decoded NCAE packages, official per-song 10-band EQ parameters, adjustable strength and account-scoped offline parameter caching; process Hi-Res and master sources at their original sample rate. Official reverb and spatial enhancement are not included.
+- **macOS**: add SVIP AI tuning with independent NCAE decoding, official per-song EQ, adjustable strength, five personal preferences and account-scoped offline caching; process high-resolution sources at their original sample rate.
+- **macOS**: add smart and preset effects with local stereo, reverb and impulse-response processing, plus explicitly labeled local emotion tuning based on official song analysis; check account entitlements before applying effects.
+- **macOS**: add interface-language selection for system, Simplified Chinese and English, with an in-app restart action.
+- **macOS**: add separate playlist (F) and all-music (Shift-F) search, row selection and playback, seeking, mute, now-playing and desktop-lyrics shortcuts; support filtering, resetting and clearing bindings with conflict detection.
 
 ### Fixed
 
+- **macOS**: keep the tonearm lifted while paused across window layout updates and rapid play/pause changes.
+- **macOS**: preserve playlist search input, text composition and keyboard selection during filtering.
+- **macOS**: clear EQ, reverb and convolution history when seeking so audio from the previous position does not carry over.
 - **macOS**: keep the vinyl stylus halfway across the playable band at half-track progress.
 - **macOS**: restore clicks on the now-playing layout and collapse buttons by removing the hidden navigation container; suppress unwanted focus rings while preserving text input and shortcut recording.
 - **macOS**: truncate long artist lists as one line with clickable names and a full-list tooltip; keep four-digit track numbers on one line in an aligned column.
@@ -25,12 +31,14 @@
 
 ### Improved
 
+- **macOS**: streamline settings with compact sections, fewer repeated headings and aligned controls; retain original Chinese quality and effect names while localizing surrounding controls and status text.
+- **macOS**: combine saved playlists, albums and followed artists into one Collections entry with three tabs; migrate and deduplicate pinned entries and shorten Chinese top-bar labels while retaining full-name tooltips.
 - **macOS**: reduce playback CPU work with stable lyric layouts and shorter transitions; stop hidden visual updates, release background artwork, bound metadata concurrency and avoid duplicate metadata requests.
 - **macOS**: bound compressed streaming backlog memory and reuse the existing audio cache for deferred decoding, avoiding duplicate writes during normal playback.
 - **macOS**: swipe horizontally on the now-playing page or playback bar to change tracks, with directional transitions and dedicated volume adjustment over the volume control; support pointer drags and two-finger trackpad gestures.
 - **macOS**: share one compact playback bar across browsing and now-playing pages, with centered transport controls, visible volume and output controls, and one button for ordered, shuffle and repeat-one modes.
 - **macOS**: restyle the vinyl player with fine grooves, a slim tonearm, an unobstructed album label and stationary reflections.
-- **macOS**: give the lyrics-page title more space below the window controls and shorten English navigation labels to Recent, Saved and Cloud.
+- **macOS**: give the lyrics-page title more space below the window controls and shorten English navigation labels to Recent and Cloud.
 - **macOS**: refine profile and message layouts with compact headers, text tabs, aligned cover grids and quieter list separators; set the main window's minimum width to 760 points.
 - **macOS**: keep back and forward arrows beside the window controls, support Command-[ and Command-], and restore complete page routes across navigation tabs.
 - **macOS**: add idle control hiding, adjustable playback transparency, vinyl tonearm progress and trackpad navigation; refine control hints and seek previews and hide scroll indicators.
@@ -48,10 +56,16 @@
 
 - **macOS**：新增个人主页，可查看歌单、关注、粉丝、个人动态、关注动态和听歌排行；新增消息中心，可查看私信历史、评论、提及、通知和未读数量；分页数据按登录账号隔离。
 - **macOS**：根据有效的 VIP、SVIP 权益逐级开放音质选项，覆盖 Hi-Res、母带和空间音频；高解析与空间音源使用原生播放路径，下载也采用账号可用的音质。
-- **macOS**：新增 SVIP AI 调音，独立解码 NCAE 音效包，应用官方逐曲 10 段均衡参数，支持强度调节和按账号缓存离线参数；Hi-Res 与母带按源采样率处理。暂不包含官方混响与空间增强。
+- **macOS**：新增 SVIP AI 调音，独立解码 NCAE 音效包，应用官方逐曲均衡参数，支持强度调节、五项个性偏好和按账号缓存离线参数；高解析音源按源采样率处理。
+- **macOS**：接入智能音效和预设音效，支持本地立体声、混响及脉冲响应处理；根据官方歌曲分析数据提供明确标注的本地情绪调音，应用音效前校验账号权益。
+- **macOS**：新增界面语言选项，支持跟随系统、简体中文和 English，并提供应用内重启。
+- **macOS**：新增歌单内搜索（F）、全局搜索（Shift-F）、选歌与播放、快进后退、静音、播放页和桌面歌词快捷键；支持筛选、重置、清除绑定和冲突检测。
 
 ### 修复
 
+- **macOS**：暂停时保持唱臂抬起，窗口布局变化和快速切换播放状态也能保持正确位置。
+- **macOS**：筛选歌单时保留搜索输入、中文组词和键盘选中状态。
+- **macOS**：拖动播放进度时清空均衡、混响和卷积处理的历史，避免前一位置的声音残留。
 - **macOS**：修正唱臂轨迹，歌曲播放到一半时，针尖位于可播放音轨区域的中部。
 - **macOS**：移除隐藏导航栏留下的遮挡容器，恢复播放页模式和收起按钮的点击；消除多余焦点框，保留文字输入和快捷键录制。
 - **macOS**：歌手名单过长时整行省略，保留姓名链接并支持悬停查看完整名单；四位数歌曲编号保持单行、整列对齐。
@@ -60,12 +74,14 @@
 
 ### 改进
 
+- **macOS**：设置页采用紧凑分区，删除重复标题并对齐控件；音质和音效保留原本的中文名称，其余控件与状态文案随界面语言切换。
+- **macOS**：收藏歌单、专辑和关注歌手合并为一个收藏入口，页内分为三个分类；迁移并去重顶栏固定项，精简中文顶栏名称并保留完整名称提示。
 - **macOS**：通过稳定歌词布局和缩短过渡降低播放 CPU 开销；停止不可见动画、释放后台封面、限制元数据请求并发并避免重复获取。
 - **macOS**：限制流式音频压缩积压的内存占用，并复用已有音频缓存延后解码，减少正常播放时的重复写盘。
 - **macOS**：播放页和播放器底栏支持左右滑动切歌，加入跟手与定向过渡动画；音量区域内滑动调整音量，支持鼠标拖动和触控板双指滑动。
 - **macOS**：浏览页与播放页共用紧凑底栏，播放控制居中，音量和输出设备直接可见；顺序、随机和单曲循环合为一个切换按钮。
 - **macOS**：黑胶播放器采用细密刻纹、纤细唱臂、完整封面和固定反光。
-- **macOS**：歌词页歌名移至窗口按钮下方，增加间距；英文导航名称缩短为 Recent、Saved 和 Cloud。
+- **macOS**：歌词页歌名移至窗口按钮下方，增加间距；英文导航名称缩短为 Recent 和 Cloud。
 - **macOS**：优化个人页与消息页，采用紧凑资料区、文字标签、对齐的封面网格和简洁分隔线；主窗口最小宽度设为 760。
 - **macOS**：前进、后退箭头固定在窗口控制键旁，支持 Command-[、Command-]，切换导航栏目后也能恢复完整页面路径。
 - **macOS**：新增播放控件闲置隐藏、可调背景透明度、唱臂进度显示和触控板导航；优化控件提示与进度预览，隐藏滚动条。
