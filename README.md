@@ -1,13 +1,59 @@
 # Liltiva
 
-这是 [missuo/kumone](https://github.com/missuo/kumone) 的个人 fork，用于个人定制。感谢 missuo 和上游贡献者。
+<img src="docs/icon.png" width="96" alt="Liltiva" />
 
-仅支持 Apple 芯片 Mac（arm64），系统要求 macOS 15 或更新版本。
+原生 macOS 网易云音乐客户端。SwiftUI 写成，直接对接网易云接口。
 
-## 未来计划
+这是 [missuo/kumone](https://github.com/missuo/kumone) 的个人 fork，感谢 missuo 和上游贡献者。在 Kumone 的基础上，Liltiva 改成顶栏导航和扁平界面，补了会员音质、官方音效和 AI 调音、个人主页与消息；播放走网易云音源，只做 Apple 芯片上的 macOS。
 
-- [ ] 适配 `ncm-cli`。
+仅支持 Apple 芯片（arm64），系统要求 macOS 15 或更新版本。
 
-感谢上游参考的项目：[YesPlayMusic](https://github.com/qier222/YesPlayMusic)（MIT，© qier222）、[kaset](https://github.com/sozercan/kaset)（MIT，© sozercan）、[UnblockNeteaseMusic/server](https://github.com/UnblockNeteaseMusic/server)（LGPL-3.0-only）和 [LyricsX](https://github.com/ddddxxx/LyricsX)（MPL-2.0，© ddddxxx）。
+## 功能
+
+**界面**
+
+- 顶栏导航：前进后退、可固定的标签、搜索和账号入口，窗口变窄时自动收进菜单
+- 黑胶、经典、歌词三种播放页；黑胶唱臂跟进度走
+- 播放页闲置后收起控件，背景透明度可调
+- 播放页和底栏左右滑动切歌，音量区域滑动调音量
+- 浏览页和播放页共用一条紧凑底栏，播放控制居中
+- 主界面可跟封面走环境色
+- 界面语言：跟随系统、简体中文、English
+
+**播放**
+
+- 音质随 VIP / SVIP 权益开放，覆盖标准、无损、Hi-Res、高清臻音、超清母带和空间音频
+- 播放栏直接切换音质和音效
+- SVIP AI 调音：官方逐曲均衡、强度调节、五项个性偏好
+- 智能音效、预设音效，以及按官方歌曲分析做的本地情绪调音
+- 顺序、随机、单曲循环
+- 逐字歌词、翻译、日文罗马音 / 汉字读音
+- 桌面歌词
+- 睡眠定时、输出设备、媒体键、Dock 菜单
+- 单曲和歌单离线下载，带存储管理
+
+**内容**
+
+- 每日推荐、私人漫游、心动模式、雷达歌单、排行榜、新碟
+- 精选分类歌单
+- 我喜欢、我的歌单、收藏（歌单 / 专辑 / 歌手）、最近播放、音乐云盘、已下载
+- 个人主页：歌单、关注、粉丝、动态、听歌排行
+- 消息中心：私信、评论、提及、通知
+- 搜索，歌单里也能搜
+
+**账户**
+
+- 扫码或手机验证码登录
+- 可自定义应用内快捷键
+- iCloud 或自选文件夹同步：续播、偏好，以及用同步密码加密的登录共享
+
+## 构建
+
+```bash
+just app
+open .build/app/Liltiva.app
+```
+
+感谢上游参考的项目：[YesPlayMusic](https://github.com/qier222/YesPlayMusic)（MIT，© qier222）、[kaset](https://github.com/sozercan/kaset)（MIT，© sozercan）和 [LyricsX](https://github.com/ddddxxx/LyricsX)（MPL-2.0，© ddddxxx）。
 
 沿用 [LGPL-3.0-only](LICENSE) 许可，附 [GPL-3.0](COPYING) 文本。第三方代码的许可与署名保留在相应源文件中。

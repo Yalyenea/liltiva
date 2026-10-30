@@ -29,6 +29,7 @@ struct PlayerChromeModifier: ViewModifier {
     @EnvironmentObject private var nowPlayingIdle: NowPlayingIdleController
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var swipePresentation = TrackSwipePresentation()
+    @State private var showsVolume = false
     func body(content: Content) -> some View {
         VStack(spacing: 0) {
             content
@@ -36,9 +37,24 @@ struct PlayerChromeModifier: ViewModifier {
                 .overlay(alignment: .trailing) {
                     rightPanel.hiddenDuringCleanPlayback(nowPlayingIdle.isClean)
                 }
-            PlayerBar()
+            PlayerBar(showsVolume: $showsVolume)
                 .environment(\.colorScheme, player.showNowPlaying ? .dark : colorScheme)
                 .hiddenDuringCleanPlayback(nowPlayingIdle.isClean && !nowPlayingIdle.isPreviewingTransport)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if showsVolume {
+                // Keep the slider inside the window's hit region, above the bar.
+                ZStack(alignment: .bottomTrailing) {
+                    Color.clear.contentShape(Rectangle())
+                        .onTapGesture { showsVolume = false }
+                        .accessibilityHidden(true)
+                    VolumeControl(isExpanded: true, showsVolume: $showsVolume)
+                        .environment(\.colorScheme, player.showNowPlaying ? .dark : colorScheme)
+                        .padding(.trailing, 12)
+                        .padding(.bottom, (Theme.Layout.playerBarHeight - 32) / 2)
+                }
+                .hiddenDuringCleanPlayback(nowPlayingIdle.isClean && !nowPlayingIdle.isPreviewingTransport)
+            }
         }
         .environmentObject(swipePresentation)
         .onChange(of: player.currentTrack?.id) { _, _ in
@@ -57,6 +73,11 @@ struct PlayerChromeModifier: ViewModifier {
                     LyricsPanel()
                 case .queue:
                     QueuePanel()
+                case .comments:
+                    if let track = player.currentTrack {
+                        // Each song owns its request state and draft, including late replies.
+                        CommentsPanel(track: track).id(track.id)
+                    }
                 }
             }
             .environment(\.colorScheme, player.showNowPlaying ? .dark : colorScheme)

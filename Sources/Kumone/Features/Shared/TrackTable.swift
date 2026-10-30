@@ -246,6 +246,15 @@ struct TrackTable: NSViewRepresentable {
         var activateSelection: (() -> Bool)?
         var focusSearch: (() -> Bool)?
 
+        override func validateProposedFirstResponder(_ responder: NSResponder, for event: NSEvent?) -> Bool {
+            // AppKit normally requires an editable control's row to be selected,
+            // but the playlist search lives in our nonselectable header row.
+            if let field = responder as? ShortcutSearchField.Field, field.isPlaylistSearch {
+                return true
+            }
+            return super.validateProposedFirstResponder(responder, for: event)
+        }
+
         override func keyDown(with event: NSEvent) {
             if ShortcutManager.shared.handleKeyEvent(event) { return }
             // Clearing/reassigning a list shortcut must also disable AppKit's

@@ -74,7 +74,7 @@ struct PlayContext: Codable, Hashable {
 }
 
 enum RightPanel {
-    case lyrics, queue
+    case lyrics, queue, comments
 }
 
 /// The playback engine: queue, shuffle/repeat, personal FM, URL resolution,
@@ -119,6 +119,12 @@ final class PlayerService: ObservableObject {
     @Published private(set) var isTrial = false
     @Published private(set) var soundEffectState: SoundEffectState = .off
     @Published private(set) var soundEffectPresets: [SoundEffectPreset] = []
+    var selectedSoundEffectName: String {
+        let settings = SettingsManager.shared
+        guard settings.soundEffectMode == .preset else { return settings.soundEffectMode.title }
+        return soundEffectPresets.first(where: { $0.id == settings.soundEffectPresetID })?.name
+            ?? String(localized: "选择音效")
+    }
     @Published private(set) var soundEffectCatalogLoading = false
     @Published private(set) var soundEffectCatalogFailed = false
     @Published private(set) var closedTuningPreferences: [AITuningPreference: String] = [:]

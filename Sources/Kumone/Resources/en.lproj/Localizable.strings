@@ -214,7 +214,6 @@
 "较高" = "较高";
 "极高" = "极高";
 "无损" = "无损";
-"高解析" = "高解析";
 "无损与 Hi-Res 需要黑胶 VIP，未开通时自动回落到可用音质" = "Lossless and Hi-Res require VIP; falls back automatically otherwise";
 "外观" = "Appearance";
 "主题" = "Theme";
@@ -616,7 +615,6 @@
 "已用于「%@」，请换一个按键。" = "Already used for “%@”. Choose another key.";
 "此组合键用于系统或页面操作，请换一个按键。" = "This shortcut is used by the system or navigation. Choose another key.";
 "无" = "None";
-"高解析度无损" = "高解析度无损";
 "音效已关闭" = "Effects off";
 
 "语言" = "Language";
@@ -637,6 +635,7 @@
 "歌曲情绪" = "Song mood";
 "重试音效" = "Retry effect";
 "音效设置…" = "Effect settings…";
+"当前音效：%@" = "Current effect: %@";
 "使用官方歌曲分析数据，由 Liltiva 本地调音。" = "Tuned locally by Liltiva using official song analysis.";
 "采用官方参数，本地处理的听感与网易云音乐可能有差异。" = "Uses official parameters. Local processing may sound different from NetEase Music.";
 "个性偏好" = "Tuning preferences";
@@ -673,3 +672,26 @@
 "navigation.tab.messages" = "Messages";
 "收藏分类" = "Collection category";
 "登录后查看你的收藏" = "Sign in to see your collections";
+
+/* Song comments */
+"歌曲评论" = "Song comments";
+"打开歌曲评论" = "Open song comments";
+"收起歌曲评论" = "Hide song comments";
+"关闭评论" = "Close comments";
+"热门评论" = "Popular comments";
+"最新评论" = "Latest comments";
+"暂无评论" = "No comments yet";
+"分享你的听歌感受吧" = "Share what this song means to you";
+"评论已删除" = "Comment deleted";
+"回复" = "Reply";
+"回复 %@" = "Reply to %@";
+"取消回复" = "Cancel reply";
+"点赞评论" = "Like comment";
+"取消点赞评论" = "Unlike comment";
+"删除评论" = "Delete comment";
+"删除这条评论？" = "Delete this comment?";
+"写下你的感受…" = "Share your thoughts…";
+"评论内容" = "Comment";
+"发送" = "Send";
+"评论已提交" = "Comment submitted";
+"登录后发表评论" = "Sign in to comment";

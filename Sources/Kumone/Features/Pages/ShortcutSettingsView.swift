@@ -125,6 +125,7 @@ extension ShortcutAction {
         case .toggleLike: return "heart"
         case .toggleLyrics: return "quote.bubble"
         case .toggleQueue: return "list.bullet"
+        case .toggleComments: return "text.bubble"
         case .closeImmersive: return "xmark.circle"
         case .volumeUp: return "speaker.wave.2"
         case .volumeDown: return "speaker.wave.1"
@@ -157,7 +158,8 @@ private enum ShortcutCategory: CaseIterable, Identifiable {
         case .search: return [.searchPlaylist, .searchLibrary, .selectPreviousRow, .selectNextRow, .playSelectedRow]
         case .playback: return [.togglePlayPause, .previousTrack, .nextTrack, .seekBackward, .seekForward,
                                 .cycleRepeatMode, .toggleLike, .toggleMute, .volumeUp, .volumeDown]
-        case .presentation: return [.toggleNowPlaying, .toggleLyrics, .toggleDesktopLyrics, .toggleQueue, .closeImmersive]
+        case .presentation: return [.toggleNowPlaying, .toggleLyrics, .toggleDesktopLyrics, .toggleQueue,
+                                    .toggleComments, .closeImmersive]
         }
     }
 }

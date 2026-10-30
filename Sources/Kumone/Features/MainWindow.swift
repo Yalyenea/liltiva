@@ -226,6 +226,7 @@ struct MainWindow: View {
             controller: nowPlayingIdle,
             isEnabled: player.showNowPlaying && windowVisibility.isOnScreen
                 && !nowPlayingIdle.isShowingOptions
+                && player.activePanel == nil
         ))
         .environmentObject(nowPlayingIdle)
         .environment(\.openLogin, { showLogin = true })

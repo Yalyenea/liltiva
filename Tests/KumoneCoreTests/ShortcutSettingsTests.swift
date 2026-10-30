@@ -40,6 +40,7 @@ struct ShortcutSettingsTests {
         #expect(manager.shortcut(for: .searchPlaylist) == .unassigned)
         #expect(manager.shortcut(for: .searchLibrary) == UserShortcut(key: "f", modifiers: .shift))
         #expect(manager.shortcut(for: .toggleQueue) == .unassigned)
+        #expect(manager.shortcut(for: .toggleComments) == UserShortcut(key: "c", modifiers: []))
         #expect(manager.appShortcuts.count == ShortcutAction.allCases.count)
         // New defaults are available to the actual event matcher, not just the settings labels.
         #expect(!manager.handleKeyEvent(try keyEvent(code: 46, key: "M", flags: .shift)))
@@ -77,7 +78,7 @@ struct ShortcutSettingsTests {
         window.contentView = editor
         try #require(window.makeFirstResponder(editor))
         for (key, code, flags) in [("f", UInt16(3), NSEvent.ModifierFlags()), ("F", 3, .shift),
-                                    ("Y", 16, .shift), (" ", 49, []), ("\u{F702}", 123, [])] {
+                                    ("c", 8, []), ("Y", 16, .shift), (" ", 49, []), ("\u{F702}", 123, [])] {
             #expect(!manager.handleKeyEvent(try keyEvent(code: code, key: key, flags: flags,
                                                         windowNumber: window.windowNumber)))
         }
@@ -131,7 +132,7 @@ struct ShortcutSettingsTests {
         }
         let escape = try keyEvent(code: 53, key: "\u{1B}")
 
-        for panel in [RightPanel.lyrics, .queue] {
+        for panel in [RightPanel.lyrics, .queue, .comments] {
             for showPage in [false, true] {
                 player.activePanel = panel
                 player.showNowPlaying = showPage

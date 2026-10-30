@@ -102,6 +102,7 @@ public enum ShortcutAction: String, Codable, CaseIterable, Identifiable, Hashabl
     case toggleLike
     case toggleLyrics
     case toggleQueue
+    case toggleComments
     case closeImmersive
     case volumeUp
     case volumeDown
@@ -120,6 +121,7 @@ public enum ShortcutAction: String, Codable, CaseIterable, Identifiable, Hashabl
         case .toggleLike: return String(localized: "喜欢")
         case .toggleLyrics: return String(localized: "歌词")
         case .toggleQueue: return String(localized: "播放队列")
+        case .toggleComments: return String(localized: "歌曲评论")
         case .closeImmersive: return String(localized: "关闭面板 / 播放页")
         case .volumeUp: return String(localized: "增加音量")
         case .volumeDown: return String(localized: "减少音量")
@@ -146,6 +148,7 @@ public enum ShortcutAction: String, Codable, CaseIterable, Identifiable, Hashabl
         case .toggleLike: return UserShortcut(key: "l", modifiers: [])
         case .toggleLyrics: return UserShortcut(key: "y", modifiers: [])
         case .toggleQueue: return UserShortcut(key: "q", modifiers: [])
+        case .toggleComments: return UserShortcut(key: "c", modifiers: [])
         case .closeImmersive: return UserShortcut(key: "\u{1B}", modifiers: [])
         case .volumeUp: return UserShortcut(key: "=", modifiers: [])
         case .volumeDown: return UserShortcut(key: "-", modifiers: [])
@@ -375,6 +378,9 @@ final class ShortcutManager: ObservableObject {
                 player.activePanel = player.activePanel == .lyrics ? nil : .lyrics
             case .toggleQueue:
                 player.activePanel = player.activePanel == .queue ? nil : .queue
+            case .toggleComments:
+                guard player.hasCurrentTrack else { return }
+                player.activePanel = player.activePanel == .comments ? nil : .comments
             case .closeImmersive:
                 player.dismissPlaybackPresentation()
             case .volumeUp:

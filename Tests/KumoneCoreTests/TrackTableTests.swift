@@ -6,6 +6,30 @@ import Testing
 @Suite("Native song-list geometry")
 @MainActor
 struct TrackTableTests {
+    @Test func clickingSearchDoesNotRequireSelectingTheHeaderRow() throws {
+        let coordinator = TrackTable.Coordinator()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = coordinator.scrollView
+        let header = ShortcutSearchField(text: .constant(""), placeholder: "Search", isPlaylistSearch: true)
+            .frame(height: 30)
+        coordinator.update(TrackTable(trackIDs: [1], header: AnyView(header), footer: AnyView(Color.clear),
+                                      headerHeight: 40, footerHeight: 20) { _ in AnyView(Text("Song")) },
+                           environment: EnvironmentValues())
+        coordinator.scrollView.layoutSubtreeIfNeeded()
+        coordinator.table.layoutSubtreeIfNeeded()
+        let field = try #require(coordinator.scrollView.descendant(of: ShortcutSearchField.Field.self))
+        let location = field.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), to: nil)
+        let click = try #require(NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
+            timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+
+        #expect(!coordinator.tableView(coordinator.table, shouldSelectRow: 0))
+        #expect(coordinator.table.selectedRow == -1)
+        #expect(coordinator.table.validateProposedFirstResponder(field, for: click))
+    }
+
     @Test func filteringRetainsTheSearchEditorAndAllowsContinuousChineseInput() throws {
         let coordinator = TrackTable.Coordinator()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),

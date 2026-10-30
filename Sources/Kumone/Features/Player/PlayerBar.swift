@@ -1,9 +1,11 @@
 import SwiftUI
 
 struct PlayerBar: View {
+    @Binding var showsVolume: Bool
     @EnvironmentObject private var player: PlayerService
     @EnvironmentObject private var settings: SettingsManager
     @EnvironmentObject private var account: AccountStore
+    @ObservedObject private var shortcuts = ShortcutManager.shared
 
     var body: some View {
         GeometryReader { proxy in
@@ -11,7 +13,7 @@ struct PlayerBar: View {
             let diameter: CGFloat = compact ? 26 : 32
             let gap: CGFloat = compact ? 6 : 10
             let transportWidth = diameter * 4 + 36 + gap * 4
-            let sideWidth = min(240, max(0, (proxy.size.width - transportWidth) / 2 - 20))
+            let sideWidth = min(280, max(0, (proxy.size.width - transportWidth) / 2 - 20))
 
             // Reserve equal side regions around the transport. Even the
             // narrow layout keeps every action visible and Play centred.
@@ -80,7 +82,7 @@ struct PlayerBar: View {
         }
         .buttonStyle(.pressable)
         .noFocusRing()
-        .help(player.showNowPlaying ? "收起播放页" : "打开播放页")
+        .help("正在播放")
         .accessibilityLabel(player.showNowPlaying ? "收起播放页" : "打开播放页")
     }
 
@@ -108,8 +110,7 @@ struct PlayerBar: View {
                              isActive: player.activePanel == .queue, disabled: player.isFMMode) {
                 player.activePanel = player.activePanel == .queue ? nil : .queue
             }
-            .controlHint(player.activePanel == .queue
-                         ? String(localized: "收起播放队列") : String(localized: "打开播放队列"))
+            .controlHint(String(localized: "播放队列"))
             .accessibilityLabel("播放队列")
         }
         .disabled(!player.hasCurrentTrack)
@@ -135,23 +136,37 @@ struct PlayerBar: View {
     }
 
     private func optionsSection(compact: Bool, diameter: CGFloat, showsQualityTitle: Bool) -> some View {
-        HStack(spacing: compact ? 1 : 8) {
+        HStack(spacing: compact ? 1 : 6) {
+            PlayerIconButton(icon: "text.bubble", size: 14, diameter: diameter,
+                             isActive: player.activePanel == .comments, disabled: !player.hasCurrentTrack) {
+                shortcuts.executeAction(.toggleComments)
+            }
+            .controlHint(commentsHint)
+            .accessibilityLabel("评论")
+            .accessibilityIdentifier("track-comments-button")
             qualityMenu(showsTitle: showsQualityTitle, diameter: diameter)
+            soundEffectMenu(diameter: diameter)
             PlayerIconButton(icon: "inset.filled.bottomthird.square", size: 16,
                              diameter: diameter, isActive: settings.showDesktopLyrics) {
                 settings.showDesktopLyrics.toggle()
             }
-            .controlHint(settings.showDesktopLyrics
-                         ? String(localized: "关闭桌面歌词") : String(localized: "打开桌面歌词"))
+            .controlHint(String(localized: "桌面歌词"))
             .accessibilityLabel("桌面歌词")
             RoutePickerButton(diameter: diameter, glyphSize: 16,
                               tint: .primary, background: .clear)
-            VolumeControl(compact: compact)
+            VolumeControl(diameter: diameter, showsVolume: $showsVolume)
         }
     }
 
+    private var commentsHint: String {
+        let title = String(localized: "评论")
+        let shortcut = shortcuts.shortcut(for: .toggleComments)
+        return shortcut.key.isEmpty ? title : "\(title) (\(shortcut.displayString))"
+    }
+
     private func qualityMenu(showsTitle: Bool, diameter: CGFloat) -> some View {
-        Menu {
+        let currentQuality = player.servedQuality.flatMap(AudioQuality.init) ?? account.playbackQuality
+        return Menu {
             Picker("播放音质", selection: Binding(
                 get: { account.playbackQuality },
                 set: { player.setAudioQuality($0) }
@@ -170,28 +185,47 @@ struct PlayerBar: View {
                 Divider()
                 Text("当前音质：\(quality.displayName)")
             }
-            Divider()
-            SoundEffectMenu()
         } label: {
             Group {
                 if showsTitle {
-                    QualityTag(text: (player.servedQuality.flatMap(AudioQuality.init) ?? account.playbackQuality).badge)
+                    QualityTag(text: currentQuality.displayName)
                 } else {
                     Image(systemName: "waveform")
                         .font(.system(size: 14, weight: .medium))
-                        .frame(width: diameter - 4)
+                        .frame(width: diameter)
                 }
             }
             .frame(height: diameter)
             .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
-        .onAppear { player.loadSoundEffectCatalog() }
         .menuIndicator(.hidden)
         .fixedSize()
-        .controlHint(String(localized: "播放音质"))
+        .controlHint(currentQuality.displayName)
         .accessibilityLabel("播放音质")
-        .accessibilityValue((player.servedQuality.flatMap(AudioQuality.init) ?? account.playbackQuality).displayName)
+        .accessibilityValue(currentQuality.displayName)
+    }
+
+    private func soundEffectMenu(diameter: CGFloat) -> some View {
+        // Effects have their own control so they remain discoverable beside quality.
+        Menu {
+            SoundEffectMenu()
+        } label: {
+            Label("音效", systemImage: "slider.horizontal.3")
+                .labelStyle(.iconOnly)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(settings.soundEffectMode == .off ? Color.primary : Theme.accent)
+                .frame(width: diameter, height: diameter)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .controlHint(player.selectedSoundEffectName)
+        .accessibilityLabel("音效")
+        .accessibilityIdentifier("sound-effect-menu")
+        .accessibilityValue(player.selectedSoundEffectName)
+        .onAppear { player.loadSoundEffectCatalog() }
     }
 }
 
@@ -462,64 +496,69 @@ struct ScrubberLane: View {
     }
 }
 
-// MARK: - Inline volume
+// MARK: - Vertical volume
 
 struct VolumeControl: View {
-    var compact = false
+    var diameter: CGFloat = 32
+    var isExpanded = false
+    @Binding var showsVolume: Bool
     @EnvironmentObject private var player: PlayerService
-    @State private var showsVolume = false
     @State private var dragStartVolume: Float?
 
     var body: some View {
-        Group {
-            if compact {
-                // Keep quality, lyrics, output and volume reachable in the narrow bar.
-                PlayerIconButton(icon: volumeIcon, size: 14, diameter: 26) {
+        VStack(spacing: 4) {
+            if isExpanded { verticalVolume }
+            if showsVolume && !isExpanded {
+                Color.clear.frame(width: diameter, height: diameter)
+            } else {
+                PlayerIconButton(icon: volumeIcon, size: 16, diameter: diameter) {
                     showsVolume.toggle()
                 }
-                .help("音量")
+                .controlHint(String(localized: "音量"), isPresented: showsVolume ? false : nil)
                 .accessibilityLabel("音量")
                 .accessibilityValue("\(Int(player.volume * 100))%")
-                .popover(isPresented: $showsVolume) { inlineVolume.padding(14) }
-            } else {
-                inlineVolume
+                .accessibilityIdentifier("volume-button")
+                .gesture(volumeDrag)
             }
         }
-        .contentShape(Rectangle())
-        .gesture(volumeDrag)
+        .fixedSize()
         .background {
-            GeometryReader { proxy in
-                Color.clear.preference(key: VolumeSwipeBoundsKey.self,
-                                       value: proxy.frame(in: .named(VolumeSwipeBoundsKey.coordinateSpace)))
+            if !isExpanded {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: VolumeSwipeBoundsKey.self,
+                                           value: proxy.frame(in: .named(VolumeSwipeBoundsKey.coordinateSpace)))
+                }
             }
         }
     }
 
-    private var inlineVolume: some View {
-        HStack(spacing: 6) {
-            Image(systemName: volumeIcon)
-                .font(.system(size: 16, weight: .medium))
-                .frame(width: 20)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.primary.opacity(0.14))
-                    Capsule().fill(.primary.opacity(0.7))
-                        .frame(width: geo.size.width * CGFloat(player.volume))
-                }
-                .frame(height: 3)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                    guard geo.size.width > 0 else { return }
-                    player.volume = Float(min(max(value.location.x / geo.size.width, 0), 1))
-                })
+    private var verticalVolume: some View {
+        GeometryReader { geo in
+            let travel = geo.size.height - 10
+            ZStack(alignment: .bottom) {
+                Capsule().fill(.primary.opacity(0.18))
+                Capsule().fill(.primary.opacity(0.8))
+                    .frame(height: travel * CGFloat(player.volume))
             }
-            .frame(width: 64, height: 26)
+            .frame(width: 4, height: travel)
+            .overlay(alignment: .bottom) {
+                Circle().fill(.primary).frame(width: 8, height: 8)
+                    .offset(y: 4 - travel * CGFloat(player.volume))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    player.volume = Float(min(max(1 - (value.location.y - 5) / travel, 0), 1))
+                })
         }
-        .help("音量")
+        .frame(width: diameter, height: 96)
+        .padding(.vertical, 4)
+        .background(.regularMaterial, in: Capsule())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("音量")
         .accessibilityValue("\(Int(player.volume * 100))%")
+        .accessibilityIdentifier("volume-slider")
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment: player.volume = min(1, player.volume + 0.05)
@@ -530,8 +569,8 @@ struct VolumeControl: View {
     }
 
     private var volumeDrag: some Gesture {
-        // Keep the slider's absolute drag; the icon uses a relative slide to
-        // avoid jumping the volume, including in the compact button layout.
+        // The vertical slider sets volume directly; sliding the icon adjusts it
+        // relatively so revealing the control never makes the volume jump.
         DragGesture(minimumDistance: 20)
             .onChanged { value in
                 guard abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }

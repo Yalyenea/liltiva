@@ -76,6 +76,11 @@ public struct LiltivaApp: App {
                     player.activePanel = player.activePanel == .queue ? nil : .queue
                 }
                 .keyboardShortcut(shortcuts.shortcut(for: .toggleQueue).menuShortcut)
+
+                Button("歌曲评论") { shortcuts.executeAction(.toggleComments) }
+                    .keyboardShortcut(shortcuts.shortcut(for: .toggleComments).menuShortcut)
+                    .disabled(!player.hasCurrentTrack)
+
                 ForEach([ShortcutAction.toggleNowPlaying, .toggleDesktopLyrics]) { action in
                     Button(action.displayName) { shortcuts.executeAction(action) }
                         .keyboardShortcut(shortcuts.shortcut(for: action).menuShortcut)

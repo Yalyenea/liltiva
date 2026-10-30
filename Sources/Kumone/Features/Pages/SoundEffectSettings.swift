@@ -12,22 +12,32 @@ struct SoundEffectSettings: View {
                 .init(value: $0, title: $0.title + membershipSuffix($0.minimumMembership),
                       isEnabled: $0.minimumMembership <= account.membershipTier)
             })
-            if settings.soundEffectMode == .preset {
-                HStack(spacing: 16) {
-                    Text("预设音效")
-                    Spacer(minLength: 12)
-                    Menu {
-                        SoundEffectPresetOptions()
-                    } label: {
-                        Text(player.soundEffectPresets.first(where: { $0.id == settings.soundEffectPresetID })?.name ?? String(localized: "选择音效"))
-                    }
-                    .fixedSize()
-                    .disabled(player.soundEffectPresets.isEmpty)
+            // Choosing a preset activates it directly; no mode change is required first.
+            SettingsPicker("预设音效", selection: Binding<Int?>(
+                get: {
+                    guard settings.soundEffectMode == .preset else { return nil }
+                    return player.soundEffectPresets.first(where: { $0.id == settings.soundEffectPresetID })?.id
+                },
+                set: { id in
+                    guard let preset = player.soundEffectPresets.first(where: { $0.id == id }) else { return }
+                    player.selectSoundEffectPreset(preset)
                 }
-                if player.soundEffectCatalogLoading { ProgressView().controlSize(.small) }
-                if player.soundEffectCatalogFailed {
-                    Button("重新加载音效列表") { player.loadSoundEffectCatalog(refresh: true) }
+            ), width: 184, options: [
+                .init(value: nil, title: String(localized: "选择音效"), isEnabled: false)
+            ] + player.soundEffectPresets.map {
+                .init(value: $0.id, title: $0.name + membershipSuffix($0.membership),
+                      isEnabled: $0.canUse(tier: account.membershipTier))
+            })
+            .disabled(player.soundEffectPresets.isEmpty)
+            if account.authenticatedAccountID == nil {
+                Text("登录后可使用音效").foregroundStyle(.secondary)
+            } else if player.soundEffectCatalogLoading {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在加载音效…").foregroundStyle(.secondary)
                 }
+            } else if player.soundEffectCatalogFailed {
+                Button("重新加载音效列表") { player.loadSoundEffectCatalog(refresh: true) }
             }
             if settings.soundEffectMode != .off {
                 LabeledContent("音效状态", value: player.soundEffectState.displayName)
@@ -83,15 +93,30 @@ struct SoundEffectPresetOptions: View {
     @ObservedObject private var settings = SettingsManager.shared
     @ObservedObject private var account = AccountStore.shared
     var body: some View {
-        ForEach(player.soundEffectPresets) { preset in
-            Button { player.selectSoundEffectPreset(preset) } label: {
-                let title = preset.name + (preset.membership == .free ? "" : " · " + preset.membership.displayName)
-                if settings.soundEffectMode == .preset && settings.soundEffectPresetID == preset.id {
-                    Label(title, systemImage: "checkmark")
-                } else { Text(title) }
-            }
-            .disabled(!preset.canUse(tier: account.membershipTier))
+        if account.authenticatedAccountID == nil {
+            Text("登录后可使用音效")
+        } else if player.soundEffectCatalogLoading && player.soundEffectPresets.isEmpty {
+            Text("正在加载音效…")
+        } else if player.soundEffectCatalogFailed {
+            Button("重新加载音效列表") { player.loadSoundEffectCatalog(refresh: true) }
+        } else if player.soundEffectPresets.isEmpty {
+            Text("暂无可用音效")
         }
+        Picker("预设音效", selection: Binding<Int?>(
+            get: { settings.soundEffectMode == .preset ? settings.soundEffectPresetID : nil },
+            set: { id in
+                guard let preset = player.soundEffectPresets.first(where: { $0.id == id }) else { return }
+                player.selectSoundEffectPreset(preset)
+            }
+        )) {
+            ForEach(player.soundEffectPresets) { preset in
+                Text(preset.name + (preset.membership == .free ? "" : " · " + preset.membership.displayName))
+                    .tag(Optional(preset.id))
+                    .disabled(!preset.canUse(tier: account.membershipTier))
+            }
+        }
+        .pickerStyle(.inline)
+        .labelsHidden()
     }
 }
 
@@ -101,17 +126,23 @@ struct SoundEffectMenu: View {
     @ObservedObject private var account = AccountStore.shared
     @Environment(\.openSettings) private var openSettings
     var body: some View {
-        ForEach(SoundEffectMode.allCases.filter { $0 != .preset }) { mode in
-            Button { player.setSoundEffectMode(mode) } label: {
-                let title = mode.title + (mode.minimumMembership == .free ? "" : " · " + mode.minimumMembership.displayName)
-                if settings.soundEffectMode == mode { Label(title, systemImage: "checkmark") }
-                else { Text(title) }
+        // A Picker sets the native menu item's checked state; a Label image does not.
+        Picker("音效模式", selection: Binding(get: { settings.soundEffectMode }, set: player.setSoundEffectMode)) {
+            ForEach(SoundEffectMode.allCases) { mode in
+                let title = mode == .preset
+                    ? (player.soundEffectPresets.first(where: { $0.id == settings.soundEffectPresetID })?.name ?? mode.title)
+                    : mode.title
+                Text(title + (mode.minimumMembership == .free ? "" : " · " + mode.minimumMembership.displayName))
+                    .tag(mode)
+                    .disabled(mode.minimumMembership > account.membershipTier)
             }
-            .disabled(mode.minimumMembership > account.membershipTier)
         }
+        .pickerStyle(.inline)
+        .labelsHidden()
+        Divider()
         Menu("音效列表") { SoundEffectPresetOptions() }
-            .disabled(player.soundEffectPresets.isEmpty)
         if settings.soundEffectMode != .off { Text(player.soundEffectState.displayName) }
+        Divider()
         Button("音效设置…") {
             openSettings()
             NotificationCenter.default.post(name: .showSoundEffectSettings, object: nil)

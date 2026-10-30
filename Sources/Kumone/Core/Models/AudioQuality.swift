@@ -48,7 +48,7 @@ enum AudioQuality: String, CaseIterable, Identifiable {
         case .higher: return String(localized: "较高")
         case .exhigh: return String(localized: "极高")
         case .lossless: return String(localized: "无损")
-        case .hires: return String(localized: "高解析度无损")
+        case .hires: return "Hi-Res"
         case .jyeffect: return String(localized: "高清臻音")
         case .jymaster: return String(localized: "超清母带")
         case .sky: return String(localized: "沉浸环绕声")
@@ -56,8 +56,6 @@ enum AudioQuality: String, CaseIterable, Identifiable {
         case .vivid: return String(localized: "臻音全景声")
         }
     }
-
-    var badge: String { self == .hires ? String(localized: "高解析") : displayName }
 
     var requiredMembership: MusicMembershipTier {
         switch self {
