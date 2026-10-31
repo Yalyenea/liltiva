@@ -19,11 +19,29 @@ final class HomeViewModel: ObservableObject {
         2_829_896_389, // 日系私人雷达
     ]
 
-    struct RadarPlaylist: Identifiable, Hashable {
+    struct RadarPlaylist: Identifiable, Hashable, Codable {
         let id: Int
         let title: String
         let subtitle: String?
         let coverURL: String?
+    }
+
+    struct Loaders {
+        var recommendations: @MainActor (Bool) async throws -> [PlaylistSummary]
+        var toplists: @MainActor () async throws -> [ToplistItem]
+        var albums: @MainActor () async throws -> [AlbumSummary]
+        var artists: @MainActor () async throws -> [ArtistSummary]
+        var radar: @MainActor () async throws -> [RadarPlaylist]
+        var daily: @MainActor (Bool) async throws -> [Track]
+
+        @MainActor static var live: Self {
+            Self(recommendations: { try await HomeViewModel.fetchRecommendPlaylists(loggedIn: $0) },
+                 toplists: { try await NeteaseAPI.toplists() },
+                 albums: { try await NeteaseAPI.newAlbums(limit: 20) },
+                 artists: { try await NeteaseAPI.topArtists() },
+                 radar: { try await HomeViewModel.fetchRadarPlaylists() },
+                 daily: { try await NeteaseAPI.cachedDailyRecommendSongs(force: $0) })
+        }
     }
 
     @Published var state: State = .idle
@@ -33,54 +51,133 @@ final class HomeViewModel: ObservableObject {
     @Published var newAlbums: [AlbumSummary] = []
     @Published var topArtists: [ArtistSummary] = []
     @Published var dailyFirstCover: String?
+    @Published var refreshError: String?
+    @Published private(set) var isRefreshing = false
+    private var context: DiscoveryCacheContext?
+    private var generation = 0
+    private let cache: PageDataCache
+    private let currentContext: @MainActor () -> DiscoveryCacheContext
+    private let loaders: Loaders
+    var matchesCurrentAccount: Bool { context == currentContext() }
+    var isEmpty: Bool { !hasContent }
 
-    func load(loggedIn: Bool) async {
-        if case .loaded = state { return }
-        state = .loading
+    init(cache: PageDataCache = .shared,
+         currentContext: @escaping @MainActor () -> DiscoveryCacheContext = { .current },
+         loaders: Loaders? = nil) {
+        self.cache = cache
+        self.currentContext = currentContext
+        self.loaders = loaders ?? .live
+    }
 
-        async let playlistsTask = fetchRecommendPlaylists(loggedIn: loggedIn)
-        async let toplistsTask = try? NeteaseAPI.toplists()
-        async let albumsTask = try? NeteaseAPI.newAlbums(limit: 20)
-        async let artistsTask = try? NeteaseAPI.topArtists()
-
-        let playlists = await playlistsTask
-        recommendPlaylists = playlists
-        toplists = (await toplistsTask ?? []).filter {
-            [19_723_756, 3_779_629, 2_884_035, 3_778_678, 60198].contains($0.id)
+    func load(loggedIn: Bool, force: Bool = false) async {
+        let binding = currentContext()
+        // Each appearance owns its completion, even when a same-account visit
+        // joins a cache request still running from the previous appearance.
+        generation += 1
+        if context != binding {
+            context = binding
+            recommendPlaylists = []; radarPlaylists = []; toplists = []
+            newAlbums = []; topArtists = []; dailyFirstCover = nil
+            state = .idle
         }
-        newAlbums = await albumsTask ?? []
-        let artists = await artistsTask ?? []
-        topArtists = Array(artists.shuffled().prefix(6))
+        let ticket = generation
+        isRefreshing = true
+        defer { if ticket == generation, context == binding { isRefreshing = false } }
+        refreshError = nil
+        if !hasContent { state = .loading }
 
-        if loggedIn {
-            if let daily = try? await NeteaseAPI.dailyRecommendSongs() {
-                dailyFirstCover = daily.first?.album.picUrl
+        async let playlists: Void = section([PlaylistSummary].self, key: "home.recommendations", context: binding,
+            ticket: ticket, force: force, apply: { self.recommendPlaylists = $0 }) {
+                try await self.loaders.recommendations(loggedIn)
             }
-            await loadRadarPlaylists()
-        }
-
-        state = playlists.isEmpty && newAlbums.isEmpty ? .error(String(localized: "网络连接失败")) : .loaded
+        async let lists: Void = section([ToplistItem].self, key: DiscoveryCache.toplistsKey, publicData: true,
+            context: binding, ticket: ticket, force: force, apply: {
+                self.toplists = $0.filter { [19_723_756, 3_779_629, 2_884_035, 3_778_678, 60198].contains($0.id) }
+            }) { try await self.loaders.toplists() }
+        async let albums: Void = section([AlbumSummary].self, key: "home.new-albums", publicData: true,
+            context: binding, ticket: ticket, force: force, apply: { self.newAlbums = $0 }) {
+                try await self.loaders.albums()
+            }
+        async let artists: Void = section([ArtistSummary].self, key: "home.top-artists", publicData: true,
+            context: binding, ticket: ticket, force: force, apply: { self.topArtists = Array($0.prefix(6)) }) {
+                try await self.loaders.artists()
+            }
+        async let radar: Void = loadPersonalSections(loggedIn: loggedIn, context: binding, ticket: ticket, force: force)
+        _ = await (playlists, lists, albums, artists, radar)
+        guard context == binding, ticket == generation, binding == currentContext() else { return }
+        if !hasContent, let refreshError { state = .error(refreshError) }
+        else { state = .loaded }
     }
 
     func reload(loggedIn: Bool) async {
-        state = .idle
-        await load(loggedIn: loggedIn)
+        await load(loggedIn: loggedIn, force: true)
     }
 
-    private func loadRadarPlaylists() async {
-        let briefs = await withTaskGroup(of: (Int, NeteaseAPI.PlaylistBrief.Body?).self) { group in
+    private var hasContent: Bool {
+        !recommendPlaylists.isEmpty || !radarPlaylists.isEmpty || !toplists.isEmpty || !newAlbums.isEmpty || !topArtists.isEmpty
+    }
+
+    private func section<Item: Codable & Sendable>(_ type: [Item].Type, key: String, publicData: Bool = false,
+        context binding: DiscoveryCacheContext, ticket: Int, force: Bool,
+        apply: @escaping @MainActor ([Item]) -> Void,
+        loader: @escaping @MainActor () async throws -> [Item]) async {
+        let cached = await cache.load(type, key: key, scope: publicData ? "public" : binding.scope)
+        guard context == binding, ticket == generation, binding == currentContext() else { return }
+        if let cached {
+            apply(cached.value)
+            state = .loaded
+        }
+        do {
+            let currentContext = self.currentContext
+            guard binding.scope != "pending", binding == currentContext() else { throw CancellationError() }
+            let values = try await cache.fetch(type, key: key, scope: publicData ? "public" : binding.scope,
+                maxAge: 30 * 60, force: force, session: binding.session) {
+                    guard binding.scope != "pending", binding == currentContext() else { throw CancellationError() }
+                    let values = try await loader()
+                    guard binding == currentContext() else { throw CancellationError() }
+                    return values
+                }
+            guard context == binding, ticket == generation, binding == currentContext() else { return }
+            apply(values)
+            if hasContent { state = .loaded }
+        } catch is CancellationError {
+        } catch {
+            guard context == binding, ticket == generation, binding == currentContext() else { return }
+            refreshError = error.localizedDescription
+        }
+    }
+
+    private func loadPersonalSections(loggedIn: Bool, context binding: DiscoveryCacheContext, ticket: Int, force: Bool) async {
+        guard loggedIn else { return }
+        async let radar: Void = section([RadarPlaylist].self, key: "home.radar", context: binding,
+            ticket: ticket, force: force, apply: { self.radarPlaylists = $0 }) {
+                try await self.loaders.radar()
+            }
+        if let cached = await cache.load([Track].self, key: NeteaseAPI.dailyCacheKey(), scope: binding.scope),
+           context == binding, ticket == generation, binding == currentContext() {
+            dailyFirstCover = cached.value.first?.album.picUrl
+        }
+        if let daily = try? await loaders.daily(force),
+           context == binding, ticket == generation, binding == currentContext() {
+            dailyFirstCover = daily.first?.album.picUrl
+        }
+        await radar
+    }
+
+    private static func fetchRadarPlaylists() async throws -> [RadarPlaylist] {
+        let briefs = try await withThrowingTaskGroup(of: (Int, NeteaseAPI.PlaylistBrief.Body).self) { group in
             for id in Self.radarPlaylistIDs {
                 group.addTask {
-                    (id, try? await NeteaseAPI.playlistBrief(id: id))
+                    (id, try await NeteaseAPI.playlistBrief(id: id))
                 }
             }
             var byID: [Int: NeteaseAPI.PlaylistBrief.Body] = [:]
-            for await (id, brief) in group {
-                if let brief { byID[id] = brief }
+            for try await (id, brief) in group {
+                byID[id] = brief
             }
             return byID
         }
-        radarPlaylists = Self.radarPlaylistIDs.compactMap { id in
+        return Self.radarPlaylistIDs.compactMap { id in
             guard let brief = briefs[id] else { return nil }
             // Names arrive as "今天从《…》听起|私人雷达" — split into title/subtitle.
             let parts = (brief.name ?? "").components(separatedBy: "|")
@@ -90,16 +187,15 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
-    private func fetchRecommendPlaylists(loggedIn: Bool) async -> [PlaylistSummary] {
+    private static func fetchRecommendPlaylists(loggedIn: Bool) async throws -> [PlaylistSummary] {
         if loggedIn {
-            async let recommend = try? NeteaseAPI.recommendResource()
-            async let personalized = try? NeteaseAPI.personalizedPlaylists(limit: 30)
-            let head = await recommend ?? []
-            let tail = await personalized ?? []
+            async let recommend = NeteaseAPI.recommendResource()
+            async let personalized = NeteaseAPI.personalizedPlaylists(limit: 30)
+            let (head, tail) = try await (recommend, personalized)
             var seen = Set<Int>()
             return (head + tail).filter { seen.insert($0.id).inserted }
         }
-        return (try? await NeteaseAPI.personalizedPlaylists(limit: 30)) ?? []
+        return try await NeteaseAPI.personalizedPlaylists(limit: 30)
     }
 }
 
@@ -110,20 +206,24 @@ struct HomeView: View {
 
     var body: some View {
         ScrollView {
-            switch model.state {
-            case .idle, .loading:
+            if !model.matchesCurrentAccount {
                 loadingBody
-            case .error(let message):
-                ErrorStateView(message: message) {
-                    Task { await model.reload(loggedIn: account.isLoggedIn) }
+            } else {
+                switch model.state {
+                case .idle, .loading:
+                    loadingBody
+                case .error(let message):
+                    ErrorStateView(message: message) {
+                        Task { await model.reload(loggedIn: account.isLoggedIn) }
+                    }
+                    .frame(minHeight: 400)
+                case .loaded:
+                    loadedBody
                 }
-                .frame(minHeight: 400)
-            case .loaded:
-                loadedBody
             }
         }
         .navigationTitle("推荐")
-        .task(id: account.isLoggedIn) {
+        .task(id: account.socialSession) {
             await model.load(loggedIn: account.isLoggedIn)
         }
     }
@@ -147,6 +247,15 @@ struct HomeView: View {
 
     private var loadedBody: some View {
         LazyVStack(alignment: .leading, spacing: 34) {
+            if model.isEmpty, model.refreshError == nil, !model.isRefreshing {
+                EmptyStateView(icon: "music.note.list", title: "暂无推荐内容")
+                    .frame(minHeight: 300)
+            }
+            if let message = model.refreshError {
+                ErrorStateView(message: message) {
+                    Task { await model.reload(loggedIn: account.isLoggedIn) }
+                }
+            }
             // Anonymous users go straight to recommended playlists;
             // the login entry lives in the sidebar / 我的 tab only.
             if account.isLoggedIn {
@@ -318,7 +427,7 @@ struct HomeView: View {
                 size: size
             ) {
                 Task {
-                    if let detail = try? await NeteaseAPI.album(id: album.id) {
+                    if let detail = try? await NeteaseAPI.cachedAlbum(id: album.id) {
                         player.play(tracks: detail.songs, source: .album(album.id),
                                     context: .album(id: album.id, name: album.name))
                     }
@@ -370,14 +479,8 @@ struct HomeView: View {
 
     private func playPlaylist(_ id: Int) {
         Task {
-            guard let detail = try? await NeteaseAPI.playlistDetail(id: id) else { return }
-            var tracks = detail.playlist.tracks
-            if tracks.isEmpty {
-                let ids = detail.playlist.trackIds.map(\.id)
-                tracks = (try? await NeteaseAPI.songDetails(ids: Array(ids.prefix(500))))?.songs ?? []
-            }
-            player.play(tracks: tracks, source: .playlist(id),
-                        context: .playlist(id: id, name: detail.playlist.name))
+            do { try await PlaylistPlayback.start(id: id) }
+            catch { ToastCenter.shared.show(error.localizedDescription) }
         }
     }
 }

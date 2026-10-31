@@ -20,6 +20,10 @@ final class SearchViewModel: ObservableObject {
     @Published var playlists: [PlaylistSummary] = []
     @Published var isLoading = false
     @Published var loadedTabs: Set<Tab> = []
+    @Published var error: String?
+    private var context: DiscoveryCacheContext?
+    private var generation = 0
+    var matchesCurrentAccount: Bool { context == .current }
 
     init(query: String) {
         self.query = query
@@ -28,6 +32,7 @@ final class SearchViewModel: ObservableObject {
     func setQuery(_ newQuery: String) {
         guard newQuery != query else { return }
         query = newQuery
+        generation += 1
         loadedTabs.removeAll()
         songs = []
         artists = []
@@ -35,32 +40,73 @@ final class SearchViewModel: ObservableObject {
         playlists = []
     }
 
-    func load(tab: Tab) async {
+    func load(tab: Tab, force: Bool = false) async {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        guard !loadedTabs.contains(tab) else { return }
+        let binding = DiscoveryCacheContext.current
+        if context != binding {
+            context = binding
+            loadedTabs.removeAll()
+            songs = []; artists = []; albums = []; playlists = []
+        }
+        generation += 1
+        guard !trimmed.isEmpty else {
+            isLoading = false
+            error = nil
+            return
+        }
+        let ticket = generation
+        let key = SearchResultCache.Key(query: trimmed, tab: tab.rawValue, scope: binding.scope, session: binding.session)
+        error = nil
+        if !force, let cached = SearchResultCache.shared.value(for: key) {
+            apply(cached, tab: tab)
+            loadedTabs.insert(tab)
+            isLoading = false
+            return
+        }
         isLoading = true
-        defer { isLoading = false }
-        loadedTabs.insert(tab)
+        defer { if ticket == generation, binding == .current { isLoading = false } }
+        do {
+            try binding.validate()
+            var results = SearchResultCache.Results()
+            switch tab {
+            case .all:
+                async let songsTask = NeteaseAPI.search(trimmed, type: .songs, limit: 12)
+                async let artistsTask = NeteaseAPI.search(trimmed, type: .artists, limit: 10)
+                async let albumsTask = NeteaseAPI.search(trimmed, type: .albums, limit: 10)
+                async let playlistsTask = NeteaseAPI.search(trimmed, type: .playlists, limit: 10)
+                let (songs, artists, albums, playlists) = try await (songsTask, artistsTask, albumsTask, playlistsTask)
+                results = .init(songs: songs.songs ?? [], artists: artists.artists ?? [],
+                                albums: albums.albums ?? [], playlists: playlists.playlists ?? [])
+            case .songs:
+                results.songs = try await NeteaseAPI.search(trimmed, type: .songs, limit: 100).songs ?? []
+            case .artists:
+                results.artists = try await NeteaseAPI.search(trimmed, type: .artists, limit: 50).artists ?? []
+            case .albums:
+                results.albums = try await NeteaseAPI.search(trimmed, type: .albums, limit: 50).albums ?? []
+            case .playlists:
+                results.playlists = try await NeteaseAPI.search(trimmed, type: .playlists, limit: 50).playlists ?? []
+            }
+            try binding.validate()
+            guard ticket == generation, self.query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
+            SearchResultCache.shared.insert(results, for: key)
+            apply(results, tab: tab)
+            loadedTabs.insert(tab)
+        } catch is CancellationError {
+        } catch {
+            guard ticket == generation, binding == .current else { return }
+            loadedTabs.remove(tab)
+            self.error = error.localizedDescription
+        }
+    }
 
+    private func apply(_ results: SearchResultCache.Results, tab: Tab) {
         switch tab {
         case .all:
-            async let songsTask = try? NeteaseAPI.search(trimmed, type: .songs, limit: 12)
-            async let artistsTask = try? NeteaseAPI.search(trimmed, type: .artists, limit: 10)
-            async let albumsTask = try? NeteaseAPI.search(trimmed, type: .albums, limit: 10)
-            async let playlistsTask = try? NeteaseAPI.search(trimmed, type: .playlists, limit: 10)
-            songs = (await songsTask)?.songs ?? []
-            artists = (await artistsTask)?.artists ?? []
-            albums = (await albumsTask)?.albums ?? []
-            playlists = (await playlistsTask)?.playlists ?? []
-        case .songs:
-            songs = (try? await NeteaseAPI.search(trimmed, type: .songs, limit: 100))?.songs ?? songs
-        case .artists:
-            artists = (try? await NeteaseAPI.search(trimmed, type: .artists, limit: 50))?.artists ?? artists
-        case .albums:
-            albums = (try? await NeteaseAPI.search(trimmed, type: .albums, limit: 50))?.albums ?? albums
-        case .playlists:
-            playlists = (try? await NeteaseAPI.search(trimmed, type: .playlists, limit: 50))?.playlists ?? playlists
+            songs = results.songs; artists = results.artists; albums = results.albums; playlists = results.playlists
+        case .songs: songs = results.songs
+        case .artists: artists = results.artists
+        case .albums: albums = results.albums
+        case .playlists: playlists = results.playlists
         }
     }
 }
@@ -68,6 +114,7 @@ final class SearchViewModel: ObservableObject {
 struct SearchView: View {
     @StateObject private var model: SearchViewModel
     @State private var searchText: String = ""
+    @EnvironmentObject private var account: AccountStore
 
     init(query: String) {
         _model = StateObject(wrappedValue: SearchViewModel(query: query))
@@ -77,20 +124,23 @@ struct SearchView: View {
     var body: some View {
         searchContent
         .navigationTitle(searchText.isEmpty ? "搜索" : String(localized: "搜索：\(searchText)"))
-        .task(id: model.tab) {
+        .task(id: "\(model.tab.rawValue):\(account.socialSession ?? "guest")") {
             await model.load(tab: model.tab)
         }
     }
 
     @ViewBuilder
     private var searchContent: some View {
-        if model.tab == .songs, !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+        if !model.matchesCurrentAccount {
+            ProgressView().frame(maxWidth: .infinity, minHeight: 300)
+        } else if model.tab == .songs, !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
             TrackListScrollView(trackIDs: model.songs.map(\.id)) {
                 VStack(spacing: 20) {
                     tabPicker
                     if model.isLoading && currentEmpty {
                         ProgressView().frame(maxWidth: .infinity, minHeight: 300)
                     }
+                    retryError
                 }
             } rows: { layout in
                 TrackListView(tracks: model.songs, layout: layout)
@@ -108,6 +158,7 @@ struct SearchView: View {
             VStack(alignment: .leading, spacing: 20) {
                 if !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
                     tabPicker
+                    retryError
 
                     if model.isLoading && currentEmpty {
                         ProgressView()
@@ -135,6 +186,15 @@ struct SearchView: View {
         .padding(.top, 12)
     }
 
+    @ViewBuilder
+    private var retryError: some View {
+        if let message = model.error {
+            ErrorStateView(message: message) {
+                Task { await model.load(tab: model.tab, force: true) }
+            }
+        }
+    }
+
     private var emptySearchPrompt: some View {
         VStack(spacing: 16) {
             Image(systemName: "magnifyingglass")
@@ -154,7 +214,7 @@ struct SearchView: View {
 
     private var currentEmpty: Bool {
         switch model.tab {
-        case .all: return model.songs.isEmpty && model.artists.isEmpty
+        case .all: return model.songs.isEmpty && model.artists.isEmpty && model.albums.isEmpty && model.playlists.isEmpty
         case .songs: return model.songs.isEmpty
         case .artists: return model.artists.isEmpty
         case .albums: return model.albums.isEmpty
@@ -191,7 +251,7 @@ struct SearchView: View {
                     playlistCards(model.playlists.prefix(8))
                 }
             }
-            if currentEmpty, !model.isLoading {
+            if currentEmpty, !model.isLoading, model.error == nil {
                 EmptyStateView(icon: "magnifyingglass", title: "没有找到相关结果")
                     .frame(minHeight: 300)
             }

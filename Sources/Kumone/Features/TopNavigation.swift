@@ -137,8 +137,8 @@ struct TopNavigationBar: View {
     @State private var searchExpanded = false
 
     private var pages: [RootPage] {
-        RootPage.primaryPages + settings.pinnedNavigationPages.filter {
-            !$0.requiresLogin || account.hasAuthCookie
+        settings.pinnedNavigationPages.filter {
+            RootPage.primaryPages.contains($0) || !$0.requiresLogin || account.hasAuthCookie
         }
     }
 
@@ -194,6 +194,7 @@ struct TopNavigationBar: View {
 
 struct NavigationMenuButton: View {
     @Binding var selection: RootPage
+    @EnvironmentObject private var settings: SettingsManager
     @State private var showMore = false
 
     var body: some View {
@@ -205,7 +206,7 @@ struct NavigationMenuButton: View {
                     Capsule().frame(width: 16, height: 1.5)
                 }
             }
-            .foregroundStyle(RootPage.menuPages.contains(selection) || showMore ? .primary : .secondary)
+            .foregroundStyle(!settings.pinnedNavigationPages.contains(selection) || showMore ? .primary : .secondary)
             .frame(width: 24, height: 24)
             .contentShape(Rectangle())
         }
@@ -230,7 +231,9 @@ private struct MorePanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(RootPage.menuPages.filter { !$0.requiresLogin || account.hasAuthCookie }) { page in
+            ForEach(RootPage.navigationPages.filter {
+                RootPage.primaryPages.contains($0) || !$0.requiresLogin || account.hasAuthCookie
+            }) { page in
                 MorePanelRow(page: page, isSelected: selection == page) {
                     selection = page
                     dismiss()
@@ -303,6 +306,7 @@ struct ToolbarSearchField: View {
     @State private var placeholderQuery = ""
     @State private var focusRequest = 0
     @ObservedObject private var shortcuts = ShortcutManager.shared
+    @EnvironmentObject private var account: AccountStore
 
     var body: some View {
         HStack(spacing: 0) {
@@ -342,8 +346,20 @@ struct ToolbarSearchField: View {
         .background(.primary.opacity(expanded ? 0.06 : 0), in: Capsule())
         .clipShape(Capsule())
         .onReceive(NotificationCenter.default.publisher(for: .focusLibrarySearch)) { _ in focusSearch() }
-        .task {
-            if let keyword = try? await NeteaseAPI.searchDefaultKeyword(), !keyword.isEmpty {
+        .task(id: account.socialSession) {
+            let binding = DiscoveryCacheContext.current
+            let cached = await PageDataCache.shared.load(String.self, key: "search.default-keyword", scope: "public")
+            if let cached, !cached.value.isEmpty, binding == .current {
+                placeholder = cached.value
+                placeholderQuery = cached.value
+            }
+            if let keyword = try? await binding.fetch(String.self, key: "search.default-keyword", publicData: true,
+                maxAge: 6 * 60 * 60, force: cached?.value.isEmpty == true, loader: {
+                    guard let keyword = try await NeteaseAPI.searchDefaultKeyword(), !keyword.isEmpty else {
+                        throw URLError(.zeroByteResource)
+                    }
+                    return keyword
+                }), binding == .current {
                 placeholder = keyword
                 placeholderQuery = keyword
             }

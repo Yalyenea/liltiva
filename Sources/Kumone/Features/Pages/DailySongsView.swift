@@ -1,29 +1,36 @@
 import SwiftUI
 
 struct DailySongsView: View {
-    @State private var tracks: [Track] = []
-    @State private var isLoading = true
-    @State private var errorMessage: String?
+    @StateObject private var model = CachedContent<[Track]>()
 
     private let player = PlayerService.shared
     @EnvironmentObject private var account: AccountStore
 
     var body: some View {
-        let displayed = isLoading || errorMessage != nil ? [] : tracks
+        let displayed = tracks
         TrackListScrollView(trackIDs: displayed.map(\.id)) {
             VStack(alignment: .leading, spacing: 20) {
                 header
                     .padding(.horizontal, Theme.Layout.contentInset)
                     .padding(.top, 16)
-                if isLoading {
+                if model.isLoading {
                     ProgressView().frame(maxWidth: .infinity, minHeight: 300)
-                } else if let errorMessage {
-                    ErrorStateView(message: errorMessage) { Task { await load() } }
+                } else if account.authenticatedAccountID == nil {
+                    ErrorStateView(message: String(localized: "登录后才能查看每日推荐")) { Task { await load() } }
+                        .frame(minHeight: 300)
+                } else if let errorMessage = model.error, model.value == nil {
+                    ErrorStateView(message: errorMessage) { Task { await load(force: true) } }
                         .frame(minHeight: 300)
                 } else if tracks.isEmpty {
                     EmptyStateView(icon: "calendar.badge.clock", title: "暂无每日推荐",
                                    subtitle: "多听几首歌培养口味，每天 6:00 更新")
                         .frame(minHeight: 300)
+                }
+                if let error = model.error, model.value != nil {
+                    HStack {
+                        Text(error).foregroundStyle(.secondary)
+                        Button("重试") { Task { await load(force: true) } }
+                    }.font(.callout).padding(.horizontal, Theme.Layout.contentInset)
                 }
             }
         } rows: { layout in
@@ -33,7 +40,14 @@ struct DailySongsView: View {
                 context: .daily,
                 recommendationContext: .daily,
                 onRecommendationReduced: { rejected, replacement in
-                    tracks.replaceRecommendation(rejected, with: replacement)
+                    var updated = tracks
+                    updated.replaceRecommendation(rejected, with: replacement)
+                    let scope = account.offlineScope, session = account.socialSession
+                    Task {
+                        guard scope == account.offlineScope, session == account.socialSession else { return }
+                        do { try await model.replace(updated) }
+                        catch { ToastCenter.shared.show(error.localizedDescription) }
+                    }
                 },
                 layout: layout
             )
@@ -42,11 +56,7 @@ struct DailySongsView: View {
             PlayerClearanceSpacer()
         }
         .navigationTitle("每日推荐")
-        .task {
-            if tracks.isEmpty {
-                await load()
-            }
-        }
+        .task(id: account.socialSession) { await load() }
     }
 
     private var header: some View {
@@ -67,6 +77,10 @@ struct DailySongsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            Button { Task { await load(force: true) } } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.plain)
+                .accessibilityLabel("刷新").help("刷新")
+                .disabled(model.isRefreshing || account.authenticatedAccountID == nil)
             Button {
                 player.play(tracks: tracks, source: .daily, context: .daily)
             } label: {
@@ -78,6 +92,7 @@ struct DailySongsView: View {
                     .background(Theme.accentGradient, in: Capsule())
             }
             .buttonStyle(.pressable)
+            .disabled(tracks.isEmpty)
         }
         .padding(.vertical, 12)
     }
@@ -89,20 +104,17 @@ struct DailySongsView: View {
         return fmt.string(from: .now)
     }
 
-    private func load() async {
-        guard account.isLoggedIn else {
-            isLoading = false
-            errorMessage = String(localized: "登录后才能查看每日推荐")
-            return
-        }
-        isLoading = true
-        errorMessage = nil
-        do {
-            tracks = try await NeteaseAPI.dailyRecommendSongs()
-            isLoading = false
-        } catch {
-            isLoading = false
-            errorMessage = error.localizedDescription
-        }
+    private var tracks: [Track] {
+        model.scope == account.offlineScope && account.authenticatedAccountID != nil ? model.value ?? [] : []
+    }
+
+    private func load(force: Bool = false) async {
+        let session = account.socialSession
+        let scope = account.authenticatedAccountID == nil ? nil : account.offlineScope
+        await model.load(key: NeteaseAPI.dailyCacheKey(), scope: scope, session: session,
+            maxAge: NeteaseAPI.dailyCacheMaxAge(), force: force,
+            current: { account.offlineScope == scope && account.socialSession == session }) {
+                try await NeteaseAPI.dailyRecommendSongs()
+            }
     }
 }

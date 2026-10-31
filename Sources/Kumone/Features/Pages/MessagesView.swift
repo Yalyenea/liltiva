@@ -79,7 +79,7 @@ private struct PrivateConversationsView: View {
 
     init(ownerID: Int) {
         self.ownerID = ownerID
-        _model = StateObject(wrappedValue: SocialPageModel { try await NeteaseAPI.privateConversations(ownerID: ownerID, cursor: $0) })
+        _model = StateObject(wrappedValue: SocialPageModel(cacheKey: "messages:conversations", alwaysRefresh: true) { try await NeteaseAPI.privateConversations(ownerID: ownerID, cursor: $0) })
     }
     var body: some View {
         ScrollView {
@@ -112,7 +112,7 @@ private struct PrivateConversationsView: View {
                     SocialPageFooter(model: model)
                 }
             }
-        }.task(id: account.socialSession) { await model.refresh() }
+        }.task(id: account.socialSession) { await model.refresh(force: false) }
     }
 }
 
@@ -125,7 +125,7 @@ private struct NotificationMessagesView: View {
 
     init(category: MessageCategory, ownerID: Int) {
         self.category = category; self.ownerID = ownerID
-        _model = StateObject(wrappedValue: SocialPageModel { cursor in
+        _model = StateObject(wrappedValue: SocialPageModel(cacheKey: "messages:\(category.rawValue)", alwaysRefresh: true) { cursor in
             switch category {
             case .comments: return try await NeteaseAPI.commentMessages(uid: ownerID, cursor: cursor)
             case .mentions: return try await NeteaseAPI.mentionMessages(cursor: cursor)
@@ -169,7 +169,7 @@ private struct NotificationMessagesView: View {
                     SocialPageFooter(model: model)
                 }
             }
-        }.task(id: account.socialSession) { await model.refresh() }
+        }.task(id: account.socialSession) { await model.refresh(force: false) }
     }
 }
 
@@ -181,7 +181,7 @@ struct ConversationView: View {
 
     init(userID: Int, name: String) {
         self.userID = userID; self.name = name
-        _model = StateObject(wrappedValue: SocialPageModel { try await NeteaseAPI.privateHistory(uid: userID, cursor: $0) })
+        _model = StateObject(wrappedValue: SocialPageModel(cacheKey: "messages:history:\(userID)", alwaysRefresh: true) { try await NeteaseAPI.privateHistory(uid: userID, cursor: $0) })
     }
     var body: some View {
         Group {

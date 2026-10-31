@@ -106,6 +106,7 @@ enum RootPage: String, Identifiable {
 
     static let primaryPages: [RootPage] = [.home, .likedSongs, .daily, .created]
     static let menuPages: [RootPage] = [.profile, .messages, .explore, .fm, .downloaded, .recents, .collections, .cloud]
+    static let navigationPages = primaryPages + menuPages
 
     var requiresLogin: Bool {
         switch self {
@@ -164,7 +165,6 @@ enum RootPage: String, Identifiable {
     }
 
     func togglePin(in pages: inout [RootPage]) {
-        guard Self.menuPages.contains(self) else { return }
         if let index = pages.firstIndex(of: self) {
             pages.remove(at: index)
         } else {
@@ -178,11 +178,21 @@ enum RootPage: String, Identifiable {
             // Merge the retired saved-playlist tab without losing its position
             // or producing a second Collections tab when both were pinned.
             let migrated = rawValue == "saved" ? "collections" : rawValue
-            guard let page = RootPage(rawValue: migrated), menuPages.contains(page),
+            guard let page = RootPage(rawValue: migrated),
                   !pages.contains(page) else { continue }
             pages.append(page)
         }
         return pages
+    }
+
+    static func loadPinnedPages(from defaults: UserDefaults) -> [RootPage] {
+        if let stored = defaults.stringArray(forKey: SettingsManager.Keys.visibleNavigationPages) {
+            // An empty list is intentional: the More menu can restore every tab.
+            return restoredPinnedPages(stored)
+        }
+        // Older versions stored only optional pins; carry over the full visible bar once.
+        let legacyPins = defaults.stringArray(forKey: SettingsManager.Keys.pinnedNavigationPages) ?? []
+        return restoredPinnedPages(primaryPages.map(\.rawValue) + legacyPins)
     }
 }
 

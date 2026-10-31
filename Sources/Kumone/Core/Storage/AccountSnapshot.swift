@@ -7,6 +7,9 @@ struct AccountSnapshot: Codable {
     let playlists: [PlaylistSummary]
     let savedAt: Date
     var membership: MusicMembership? = nil
+    // Missing fields identify snapshots written before collection caching existed.
+    var likedAlbums: [AlbumSummary]? = nil
+    var likedArtists: [ArtistSummary]? = nil
 
     func matches(fingerprint: String?) -> Bool { fingerprint != nil && fingerprint == authenticationFingerprint }
 }

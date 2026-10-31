@@ -177,6 +177,128 @@ struct TrackCommentsTests {
         #expect(await model.send("A submitted comment") == true)
         #expect(model.comments.isEmpty && model.total == 0 && model.mutationError == nil)
     }
+
+    @Test @MainActor func diskSnapshotPreservesRepliesAndPaginationAndFailedRefresh() async throws {
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".tmp/comment-cache-tests/\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = PageDataCache(directory: directory), session = CommentSession()
+        let item = try JSONDecoder().decode(TrackComment.self, from: Data(#"{"commentId":1,"user":{"userId":7},"content":"Reply","time":200,"beReplied":[{"user":{"userId":8},"content":"Original"}]}"#.utf8))
+        let first = TrackCommentsModel(trackID: 42, cache: cache, scope: { "netease:7" }, session: { session.value }) { _ in
+            .init(comments: [item], hotComments: [item], total: 2, more: true)
+        }
+        await first.refresh()
+        var requested: [Int?] = []
+        var fail = true
+        let restored = TrackCommentsModel(trackID: 42, cache: cache, scope: { "netease:7" }, session: { session.value }) { before in
+            requested.append(before)
+            if fail { throw URLError(.notConnectedToInternet) }
+            return .init(comments: [], hotComments: nil, total: 1, more: false)
+        }
+        await restored.refresh(force: false)
+        await restored.refresh(force: false)
+        #expect(requested.isEmpty && restored.comments.first?.beReplied?.first?.content == "Original")
+        #expect(restored.hasLoaded && restored.hasMore && restored.hotComments.first?.id == 1)
+        await restored.loadMore()
+        #expect(requested.count == 1 && requested[0] == 200 && restored.comments.count == 1 && restored.error != nil)
+        await restored.refresh()
+        #expect(restored.comments.count == 1 && restored.hotComments.count == 1 && restored.total == 2)
+        fail = false
+        await restored.loadMore()
+        #expect(requested.count == 3 && requested[2] == nil && restored.hasLoaded && restored.comments.isEmpty && !restored.hasMore)
+    }
+
+    @Test @MainActor func commentMutationsUpdateThePersistedSnapshotWithoutRevivingDeletedRows() async throws {
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".tmp/comment-cache-tests/\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory); CommentsProtocol.handler = nil }
+        let cache = PageDataCache(directory: directory), client = client()
+        let item = try commentFixture(1, time: 200)
+        let model = TrackCommentsModel(trackID: 42, client: client, cache: cache,
+            scope: { "netease:7" }, session: { client.authenticationFingerprint }) { _ in
+            .init(comments: [item], hotComments: [item], total: 1, more: true)
+        }
+        await model.refresh()
+        CommentsProtocol.handler = { _ in Data(#"{"code":200}"#.utf8) }
+        await model.toggleLike(item)
+        let liked = try #require(await cache.load(TrackCommentsSnapshot.self, key: "track-comments:42", scope: "netease:7"))
+        #expect(liked.value.comments.first?.liked == true && liked.value.hotComments.first?.liked == true)
+        await model.delete(item)
+        var requests = 0
+        let reopened = TrackCommentsModel(trackID: 42, cache: cache, scope: { "netease:7" }, session: { client.authenticationFingerprint }) { before in
+            requests += 1
+            #expect(before == 200)
+            return .init(comments: [], hotComments: nil, total: 0, more: false)
+        }
+        await reopened.refresh(force: false)
+        #expect(reopened.comments.isEmpty && reopened.hotComments.isEmpty && reopened.total == 0 && requests == 0)
+        await reopened.loadMore()
+        #expect(requests == 1 && !reopened.hasMore)
+        CommentsProtocol.handler = { _ in Data(#"{"code":200,"comment":null}"#.utf8) }
+        #expect(await model.send("Awaiting moderation"))
+        #expect(await cache.load(TrackCommentsSnapshot.self, key: "track-comments:42", scope: "netease:7") == nil)
+    }
+
+
+    @Test @MainActor func reopeningCommentsJoinsTheRequestOwnedByTheCache() async throws {
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".tmp/comment-cache-tests/\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = PageDataCache(directory: directory), session = CommentSession(), gate = CommentResponseGate()
+        let item = try commentFixture(1)
+        var requests = 0
+        let first = TrackCommentsModel(trackID: 42, cache: cache, scope: { "netease:7" }, session: { session.value }) { _ in
+            requests += 1
+            await gate.wait()
+            try Task.checkCancellation()
+            return .init(comments: [item], hotComments: [item], total: 1, more: false)
+        }
+        let old = Task { await first.refresh(force: false) }
+        for _ in 0..<100 { if await gate.entered { break }; await Task.yield() }
+        old.cancel()
+        let reopened = TrackCommentsModel(trackID: 42, cache: cache, scope: { "netease:7" }, session: { session.value }) { _ in
+            requests += 1
+            return .init(comments: [], hotComments: nil, total: 0, more: false)
+        }
+        let joined = Task { await reopened.refresh() }
+        for _ in 0..<100 { await Task.yield() }
+        await gate.open(); await old.value; await joined.value
+        #expect(requests == 1 && first.comments.isEmpty && reopened.comments.first?.id == 1)
+        let saved = await cache.load(TrackCommentsSnapshot.self, key: "track-comments:42", scope: "netease:7")
+        #expect(saved?.value.comments.first?.id == 1 && saved?.value.hotComments.first?.id == 1)
+    }
+
+
+    @Test @MainActor func deletionInvalidatesAnOlderSharedRefreshFromAnotherModel() async throws {
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".tmp/comment-cache-tests/\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory); CommentsProtocol.handler = nil }
+        let cache = PageDataCache(directory: directory), client = client(), gate = CommentResponseGate()
+        let item = try commentFixture(1)
+        try await cache.save(TrackCommentsSnapshot(comments: [item], hotComments: [item], total: 1,
+                                                  cursor: 1000, hasMore: false),
+                             key: "track-comments:42", scope: "netease:7")
+        let old = TrackCommentsModel(trackID: 42, cache: cache, scope: { "netease:7" },
+            session: { client.authenticationFingerprint }) { _ in
+            await gate.wait()
+            return .init(comments: [item], hotComments: [item], total: 1, more: false)
+        }
+        let pending = Task { await old.refresh() }
+        for _ in 0..<100 { if await gate.entered { break }; await Task.yield() }
+        let mutator = TrackCommentsModel(trackID: 42, client: client, cache: cache, scope: { "netease:7" },
+            session: { client.authenticationFingerprint }) { _ in
+            Issue.record("A fresh snapshot must skip this loader")
+            return .init(comments: [], hotComments: nil, total: 0, more: false)
+        }
+        await mutator.refresh(force: false)
+        CommentsProtocol.handler = { _ in Data(#"{"code":200}"#.utf8) }
+        await mutator.delete(item)
+        await gate.open(); await pending.value
+        let saved = try #require(await cache.load(TrackCommentsSnapshot.self, key: "track-comments:42", scope: "netease:7"))
+        #expect(saved.value.comments.isEmpty && saved.value.hotComments.isEmpty && saved.value.total == 0)
+        #expect(old.error != nil && old.comments.first?.id == 1)
+    }
+
 }
 
 @Suite("Live track comments")

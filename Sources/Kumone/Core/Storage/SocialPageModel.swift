@@ -1,9 +1,16 @@
 import Combine
 import Foundation
 
-/// A bounded page of account data. Both the request generation and login
-/// binding are checked after suspension, so a late reply cannot repopulate a
-/// page after sign-out, account switching, or refresh.
+struct SocialPageSnapshot<Item> {
+    let items: [Item]
+    let nextCursor: Int?
+    let hasMore: Bool
+}
+extension SocialPageSnapshot: Codable where Item: Codable {}
+extension SocialPageSnapshot: Sendable where Item: Sendable {}
+
+/// Keep pagination and its cursor together so restoring a page can continue
+/// from exactly the last successfully displayed result.
 @MainActor
 final class SocialPageModel<Item: Identifiable>: ObservableObject {
     typealias Loader = (Int?) async throws -> SocialPage<Item>
@@ -13,54 +20,145 @@ final class SocialPageModel<Item: Identifiable>: ObservableObject {
     @Published private(set) var hasLoaded = false
     @Published private(set) var hasMore = false
     private(set) var session: String?
+    private var loadedScope: String?
     private var nextCursor: Int?
     private var generation = 0
+    private var refreshFailed = false
     private let currentSession: @MainActor () -> String?
     private let loader: Loader
+    private var cacheRead: ((String) async -> (SocialPageSnapshot<Item>, Date)?)?
+    private var cacheWrite: ((SocialPageSnapshot<Item>, String) async throws -> Void)?
+    private var cacheFetch: ((String, String, Bool) async throws -> SocialPageSnapshot<Item>)?
+    private var currentScope: @MainActor () -> String? = { nil }
+    private var maxAge: TimeInterval = 60
+    private var alwaysRefresh = false
 
     init(session: @escaping @MainActor () -> String? = { AccountStore.shared.socialSession }, load: @escaping Loader) {
         currentSession = session
         loader = load
     }
 
+    convenience init(cacheKey: String, maxAge: TimeInterval = 60, alwaysRefresh: Bool = false,
+                     cache: PageDataCache = .shared,
+                     scope: @escaping @MainActor () -> String? = { AccountStore.shared.offlineScope },
+                     session: @escaping @MainActor () -> String? = { AccountStore.shared.socialSession },
+                     load: @escaping Loader) where Item: Codable & Sendable {
+        self.init(session: session, load: load)
+        currentScope = scope
+        self.maxAge = maxAge
+        self.alwaysRefresh = alwaysRefresh
+        cacheRead = { scope in
+            guard let cached = await cache.load(SocialPageSnapshot<Item>.self, key: cacheKey, scope: scope) else { return nil }
+            return (cached.value, cached.savedAt)
+        }
+        cacheWrite = { value, scope in
+            try await cache.save(value, key: cacheKey, scope: scope)
+        }
+        cacheFetch = { requestedScope, binding, force in
+            try await cache.fetch(SocialPageSnapshot<Item>.self, key: cacheKey, scope: requestedScope,
+                                  maxAge: maxAge, force: force, session: binding) {
+                guard binding == session(), requestedScope == scope() else { throw CancellationError() }
+                let page = try await load(nil)
+                guard binding == session(), requestedScope == scope() else { throw CancellationError() }
+                return SocialPageModel<Item>.firstSnapshot(page)
+            }
+        }
+    }
+
     func reset() {
         generation += 1
         session = currentSession()
+        loadedScope = currentScope()
         items = []
         nextCursor = nil
         hasMore = false
         hasLoaded = false
+        refreshFailed = false
         error = nil
         isLoading = false
     }
 
-    func refresh() async {
-        reset()
-        await loadMore()
+    func refresh(force: Bool = true) async {
+        if session != currentSession() || loadedScope != currentScope() { reset() }
+        guard let binding = currentSession() else { return }
+        generation += 1
+        let ticket = generation, scope = currentScope()
+        isLoading = true
+        error = nil
+        defer { if ticket == generation { isLoading = false } }
+        if !hasLoaded || !force, let scope, let cached = await cacheRead?(scope) {
+            guard isCurrent(ticket, binding, scope) else { return }
+            apply(cached.0)
+            let age = Date().timeIntervalSince(cached.1)
+            if !force, !alwaysRefresh, age >= 0, age < maxAge {
+                refreshFailed = false
+                return
+            }
+        }
+        do {
+            let value: SocialPageSnapshot<Item>
+            if let scope, let cacheFetch {
+                // The cache owns this request so another view can join it after navigation.
+                value = try await cacheFetch(scope, binding, force || alwaysRefresh)
+            } else {
+                value = Self.firstSnapshot(try await loader(nil))
+            }
+            guard isCurrent(ticket, binding, scope) else { return }
+            apply(value)
+            refreshFailed = false
+        } catch {
+            guard isCurrent(ticket, binding, scope) else { return }
+            refreshFailed = true
+            self.error = error.localizedDescription
+        }
     }
 
     func loadMore() async {
-        guard let binding = currentSession(), !isLoading else { return }
-        if session != binding { reset() }
-        guard !hasLoaded || hasMore else { return }
-        let ticket = generation
-        let cursor = nextCursor
+        if session != currentSession() || loadedScope != currentScope() { reset() }
+        if !hasLoaded || refreshFailed { await refresh(); return }
+        guard let binding = currentSession(), !isLoading, hasMore else { return }
+        let ticket = generation, cursor = nextCursor, scope = currentScope()
         isLoading = true
         error = nil
         defer { if ticket == generation { isLoading = false } }
         do {
             let page = try await loader(cursor)
-            guard ticket == generation, binding == currentSession(), !Task.isCancelled else { return }
-            var seen = Set(items.map(\.id))
-            items.append(contentsOf: page.items.filter { seen.insert($0.id).inserted })
-            nextCursor = page.nextCursor
-            // A server repeating its cursor must not create an endless load loop.
-            hasMore = !page.items.isEmpty && page.nextCursor != nil && page.nextCursor != cursor
-            hasLoaded = true
+            guard isCurrent(ticket, binding, scope) else { return }
+            accept(page, after: cursor)
+            if let scope { try await cacheWrite?(snapshot, scope) }
         } catch {
-            guard ticket == generation, binding == currentSession(), !Task.isCancelled else { return }
+            guard isCurrent(ticket, binding, scope) else { return }
             self.error = error.localizedDescription
         }
+    }
+
+    private var snapshot: SocialPageSnapshot<Item> {
+        .init(items: items, nextCursor: nextCursor, hasMore: hasMore)
+    }
+
+    private static func firstSnapshot(_ page: SocialPage<Item>) -> SocialPageSnapshot<Item> {
+        var seen = Set<Item.ID>()
+        return .init(items: page.items.filter { seen.insert($0.id).inserted }, nextCursor: page.nextCursor,
+                     hasMore: !page.items.isEmpty && page.nextCursor != nil)
+    }
+
+    private func apply(_ value: SocialPageSnapshot<Item>) {
+        items = value.items
+        nextCursor = value.nextCursor
+        hasMore = value.hasMore
+        hasLoaded = true
+    }
+
+    private func accept(_ page: SocialPage<Item>, after cursor: Int?) {
+        var seen = Set(items.map(\.id))
+        items.append(contentsOf: page.items.filter { seen.insert($0.id).inserted })
+        nextCursor = page.nextCursor
+        hasMore = !page.items.isEmpty && page.nextCursor != nil && page.nextCursor != cursor
+        hasLoaded = true
+    }
+
+    private func isCurrent(_ ticket: Int, _ binding: String, _ scope: String?) -> Bool {
+        ticket == generation && binding == currentSession() && scope == currentScope() && !Task.isCancelled
     }
 }
 

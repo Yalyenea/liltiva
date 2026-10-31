@@ -34,21 +34,39 @@ struct NavigationDestinationTests {
         #expect(pages == [.explore, .collections])
     }
 
-    @Test func primaryTabsCannotBeDuplicatedByPinning() {
-        var pages: [RootPage] = []
-        for page in RootPage.primaryPages {
+    @Test func everyTabCanBeHiddenAndShownAgain() {
+        var pages = RootPage.navigationPages
+        #expect(Set(pages).count == 12)
+        for page in RootPage.navigationPages {
             page.togglePin(in: &pages)
+            #expect(!pages.contains(page))
         }
         #expect(pages.isEmpty)
-        #expect(RootPage.menuPages.contains(.collections))
-        #expect(!RootPage.menuPages.contains(.created))
+        for page in RootPage.navigationPages {
+            page.togglePin(in: &pages)
+        }
+        #expect(pages == RootPage.navigationPages)
+    }
+
+    @Test func savedVisibilityPreservesEmptyListsAndMigratesExistingPins() throws {
+        let domain = "io.github.yalyenea.Liltiva.navigation-test.\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+
+        #expect(RootPage.loadPinnedPages(from: defaults) == RootPage.primaryPages)
+        defaults.set(["profile", "saved", "cloud", "collections"], forKey: SettingsManager.Keys.pinnedNavigationPages)
+        #expect(RootPage.loadPinnedPages(from: defaults) == RootPage.primaryPages + [.profile, .collections, .cloud])
+        defaults.set(["daily", "home"], forKey: SettingsManager.Keys.visibleNavigationPages)
+        #expect(RootPage.loadPinnedPages(from: defaults) == [.daily, .home])
+        defaults.set([String](), forKey: SettingsManager.Keys.visibleNavigationPages)
+        #expect(RootPage.loadPinnedPages(from: defaults).isEmpty)
     }
 
     @Test func savedPlaylistPinsMigrateToOneCollectionEntryInOrder() {
         #expect(RootPage.restoredPinnedPages(["profile", "saved", "cloud", "collections"]) == [.profile, .collections, .cloud])
         #expect(RootPage.restoredPinnedPages(["collections", "saved", "messages"]) == [.collections, .messages])
         #expect(RootPage.restoredPinnedPages(["saved"]) == [.collections])
-        #expect(RootPage.restoredPinnedPages(["home", "unknown", "cloud", "cloud"]) == [.cloud])
+        #expect(RootPage.restoredPinnedPages(["home", "unknown", "cloud", "cloud"]) == [.home, .cloud])
         #expect(RootPage(rawValue: "saved") == nil)
         #expect(RootPage.menuPages.filter { $0 == .collections }.count == 1)
     }

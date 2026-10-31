@@ -96,6 +96,7 @@ final class SettingsManager: ObservableObject {
         static let transparentPlayback = "settings.transparentPlayback"
         static let playbackTransparency = "settings.playbackTransparency"
         static let pinnedNavigationPages = "settings.pinnedNavigationPages"
+        static let visibleNavigationPages = "settings.visibleNavigationPages"
         static let showTranslation = "settings.showLyricsTranslation"
         static let showRomaji = "settings.showLyricsRomaji"  // migrated to `annotation`
         static let annotation = "settings.lyricsAnnotation"
@@ -196,7 +197,7 @@ final class SettingsManager: ObservableObject {
 
     @Published var pinnedNavigationPages: [RootPage] {
         didSet {
-            UserDefaults.standard.set(pinnedNavigationPages.map(\.rawValue), forKey: Keys.pinnedNavigationPages)
+            UserDefaults.standard.set(pinnedNavigationPages.map(\.rawValue), forKey: Keys.visibleNavigationPages)
         }
     }
 
@@ -296,12 +297,9 @@ final class SettingsManager: ObservableObject {
             ?? Self.defaultPlaybackTransparency
         playbackTransparency = min(max(storedPlaybackTransparency, Self.playbackTransparencyRange.lowerBound),
                                    Self.playbackTransparencyRange.upperBound)
-        let storedPins = defaults.stringArray(forKey: Keys.pinnedNavigationPages) ?? []
-        let restoredPins = RootPage.restoredPinnedPages(storedPins)
+        let restoredPins = RootPage.loadPinnedPages(from: defaults)
         pinnedNavigationPages = restoredPins
-        if storedPins != restoredPins.map(\.rawValue) {
-            defaults.set(restoredPins.map(\.rawValue), forKey: Keys.pinnedNavigationPages)
-        }
+        defaults.set(restoredPins.map(\.rawValue), forKey: Keys.visibleNavigationPages)
         showLyricsTranslation = defaults.object(forKey: Keys.showTranslation) as? Bool ?? true
         // Carry over the old on/off romaji toggle for anyone who had it on.
         lyricsAnnotation = defaults.string(forKey: Keys.annotation).flatMap(LyricsAnnotation.init)

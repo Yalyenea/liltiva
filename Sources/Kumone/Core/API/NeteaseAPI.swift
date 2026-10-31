@@ -112,8 +112,11 @@ enum NeteaseAPI {
     }
 
     static func userPlaylists(uid: Int, limit: Int = 2000, offset: Int = 0) async throws -> [PlaylistSummary] {
-        try await weapi(UserPlaylistsResponse.self, "/user/playlist",
-                        ["uid": uid, "limit": limit, "offset": offset, "includeVideo": true]).playlist
+        try await collectSublist(limit: limit, offset: offset) { limit, offset in
+            let response = try await weapi(UserPlaylistsResponse.self, "/user/playlist",
+                ["uid": uid, "limit": limit, "offset": offset, "includeVideo": true])
+            return SublistResponse(data: response.playlist, count: nil, hasMore: response.more)
+        }
     }
 
     struct LikelistResponse: Decodable {
@@ -139,13 +142,46 @@ enum NeteaseAPI {
     }
 
     static func likedAlbums(limit: Int = 500, offset: Int = 0) async throws -> [AlbumSummary] {
-        try await weapi(SublistResponse<AlbumSummary>.self, "/album/sublist",
-                        ["limit": limit, "offset": offset, "total": true]).data
+        try await collectSublist(limit: limit, offset: offset) { limit, offset in
+            try await weapi(SublistResponse<AlbumSummary>.self, "/album/sublist",
+                            ["limit": limit, "offset": offset, "total": true])
+        }
     }
 
     static func likedArtists(limit: Int = 500, offset: Int = 0) async throws -> [ArtistSummary] {
-        try await weapi(SublistResponse<ArtistSummary>.self, "/artist/sublist",
-                        ["limit": limit, "offset": offset, "total": true]).data
+        try await collectSublist(limit: limit, offset: offset) { limit, offset in
+            try await weapi(SublistResponse<ArtistSummary>.self, "/artist/sublist",
+                            ["limit": limit, "offset": offset, "total": true])
+        }
+    }
+
+    static func collectSublist<Item: Decodable & Identifiable>(limit: Int, offset: Int = 0,
+        page: (Int, Int) async throws -> SublistResponse<Item>) async throws -> [Item] {
+        guard limit > 0, offset >= 0 else { throw NeteaseAPIError.decoding("Invalid page size") }
+        var result: [Item] = [], seen: Set<Item.ID> = []
+        var cursor = offset
+        var total: Int?
+        while true {
+            try Task.checkCancellation()
+            let response = try await page(limit, cursor)
+            if let previous = total, let count = response.count, previous != count {
+                throw NeteaseAPIError.decoding("Library changed during pagination")
+            }
+            total = response.count ?? total
+            let added = response.data.filter { seen.insert($0.id).inserted }
+            result.append(contentsOf: added)
+            let more = response.hasMore ?? total.map { cursor + response.data.count < $0 }
+                ?? (response.data.count == limit)
+            guard !more else {
+                guard !added.isEmpty else { throw NeteaseAPIError.decoding("Repeated or empty page") }
+                cursor += response.data.count
+                continue
+            }
+            if let total, result.count < max(0, total - offset) {
+                throw NeteaseAPIError.decoding("Incomplete library")
+            }
+            return result
+        }
     }
 
     struct PlayRecordResponse: Decodable {
@@ -172,8 +208,9 @@ enum NeteaseAPI {
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            data = try? c.decode([CloudSongItem].self, forKey: .data)
-            hasMore = try? c.decode(Bool.self, forKey: .hasMore)
+            // Missing or malformed membership must never overwrite a saved cloud as empty.
+            data = try c.decode([CloudSongItem].self, forKey: .data)
+            hasMore = try c.decodeIfPresent(Bool.self, forKey: .hasMore)
             size = (try? c.decode(Int64.self, forKey: .size))
                 ?? (try? c.decode(String.self, forKey: .size)).flatMap(Int64.init)
             maxSize = (try? c.decode(Int64.self, forKey: .maxSize))
@@ -553,7 +590,7 @@ enum NeteaseAPI {
 
     // MARK: - Artists
 
-    struct ArtistResponse: Decodable {
+    struct ArtistResponse: Codable {
         let artist: ArtistSummary
         let hotSongs: [Track]
     }

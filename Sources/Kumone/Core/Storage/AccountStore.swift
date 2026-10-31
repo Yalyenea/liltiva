@@ -12,6 +12,10 @@ final class AccountStore: ObservableObject {
     @Published var userPlaylists: [PlaylistSummary] = []
     @Published var likedAlbums: [AlbumSummary] = []
     @Published var likedArtists: [ArtistSummary] = []
+    @Published private(set) var hasLoadedLikedAlbums = false
+    @Published private(set) var hasLoadedLikedArtists = false
+    @Published private(set) var isRefreshingSublists = false
+    @Published private(set) var sublistsError: String?
     @Published var isBootstrapped = false
     @Published private(set) var membership: MusicMembership?
     @Published private(set) var isRefreshingMembership = false
@@ -48,6 +52,10 @@ final class AccountStore: ObservableObject {
     private var networkObserver: AnyCancellable?
     private var activationObserver: AnyCancellable?
     private var membershipRequestID = UUID()
+    private var sublistsTask: Task<Void, Never>?
+    private var sublistsRequestID = UUID()
+    private var sublistsScope: String?
+    private var sublistsSession: String?
 
     var likedSongsPlaylist: PlaylistSummary? {
         userPlaylists.first(where: \.isLikedSongsList) ?? userPlaylists.first
@@ -70,6 +78,10 @@ final class AccountStore: ObservableObject {
             userPlaylists = snapshot.playlists
             profileBinding = snapshot.authenticationFingerprint
             membership = snapshot.membership
+            likedAlbums = snapshot.likedAlbums ?? []
+            likedArtists = snapshot.likedArtists ?? []
+            hasLoadedLikedAlbums = snapshot.likedAlbums != nil
+            hasLoadedLikedArtists = snapshot.likedArtists != nil
         }
     }
 
@@ -98,10 +110,12 @@ final class AccountStore: ObservableObject {
     func refreshLibrary() async {
         guard let uid = profile?.userId else { return }
         async let refreshedMembership: Void = refreshMembership()
+        async let refreshedSublists: Void = refreshSublists()
         async let playlists = try? NeteaseAPI.userPlaylists(uid: uid)
         async let liked = try? NeteaseAPI.likedTrackIDs(uid: uid)
         let (fetchedPlaylists, fetchedLiked) = await (playlists, liked)
         await refreshedMembership
+        await refreshedSublists
         guard profile?.userId == uid, profileBinding == NeteaseClient.shared.authenticationFingerprint else { return }
         userPlaylists = fetchedPlaylists ?? userPlaylists
         if let ids = fetchedLiked { likedTrackIDs = Set(ids) }
@@ -172,14 +186,94 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    func refreshSublists() async {
-        let scope = offlineScope
-        async let albums = try? NeteaseAPI.likedAlbums()
-        async let artists = try? NeteaseAPI.likedArtists()
-        let (fetchedAlbums, fetchedArtists) = await (albums, artists)
-        guard scope == offlineScope else { return }
-        likedAlbums = fetchedAlbums ?? likedAlbums
-        likedArtists = fetchedArtists ?? likedArtists
+    func refreshSublists(force: Bool = false) async {
+        guard let scope = offlineScope, let session = socialSession else { return }
+        if !force, sublistsScope == scope, sublistsSession == session, let sublistsTask {
+            await sublistsTask.value
+            return
+        }
+        sublistsTask?.cancel()
+        let requestID = UUID()
+        sublistsRequestID = requestID
+        sublistsScope = scope
+        sublistsSession = session
+        isRefreshingSublists = true
+        sublistsError = nil
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.loadSublists(scope: scope, session: session, requestID: requestID, force: force)
+        }
+        sublistsTask = task
+        await task.value
+    }
+
+    private func loadSublists(scope: String, session: String, requestID: UUID, force: Bool) async {
+        defer {
+            if sublistsRequestID == requestID {
+                isRefreshingSublists = false
+                sublistsTask = nil
+            }
+        }
+        let cache = PageDataCache.shared
+        let cachedAlbums = await cache.load([AlbumSummary].self, key: "liked-albums", scope: scope)
+        let cachedArtists = await cache.load([ArtistSummary].self, key: "liked-artists", scope: scope)
+        guard sublistsAreCurrent(scope: scope, session: session, requestID: requestID) else { return }
+        if let cachedAlbums {
+            likedAlbums = cachedAlbums.value
+            hasLoadedLikedAlbums = true
+        }
+        if let cachedArtists {
+            likedArtists = cachedArtists.value
+            hasLoadedLikedArtists = true
+        }
+        if force {
+            // Invalidate the cache revision before starting new reads after a mutation.
+            for key in ["liked-albums", "liked-artists"] {
+                do { try await cache.remove(key: key, scope: scope) }
+                catch {
+                    guard sublistsAreCurrent(scope: scope, session: session, requestID: requestID) else { return }
+                    sublistsError = error.localizedDescription
+                }
+            }
+        }
+        guard sublistsAreCurrent(scope: scope, session: session, requestID: requestID) else { return }
+        async let albums = cache.fetch([AlbumSummary].self, key: "liked-albums", scope: scope,
+                                       maxAge: 300, force: force, session: session) {
+            guard self.offlineScope == scope, self.socialSession == session else { throw CancellationError() }
+            let value = try await NeteaseAPI.likedAlbums()
+            guard self.offlineScope == scope, self.socialSession == session else { throw CancellationError() }
+            return value
+        }
+        async let artists = cache.fetch([ArtistSummary].self, key: "liked-artists", scope: scope,
+                                        maxAge: 300, force: force, session: session) {
+            guard self.offlineScope == scope, self.socialSession == session else { throw CancellationError() }
+            let value = try await NeteaseAPI.likedArtists()
+            guard self.offlineScope == scope, self.socialSession == session else { throw CancellationError() }
+            return value
+        }
+        do {
+            let value = try await albums
+            guard sublistsAreCurrent(scope: scope, session: session, requestID: requestID) else { return }
+            likedAlbums = value
+            hasLoadedLikedAlbums = true
+        } catch {
+            guard sublistsAreCurrent(scope: scope, session: session, requestID: requestID) else { return }
+            sublistsError = error.localizedDescription
+        }
+        do {
+            let value = try await artists
+            guard sublistsAreCurrent(scope: scope, session: session, requestID: requestID) else { return }
+            likedArtists = value
+            hasLoadedLikedArtists = true
+        } catch {
+            guard sublistsAreCurrent(scope: scope, session: session, requestID: requestID) else { return }
+            sublistsError = error.localizedDescription
+        }
+        saveSnapshot()
+    }
+
+    private func sublistsAreCurrent(scope: String, session: String, requestID: UUID) -> Bool {
+        !Task.isCancelled && sublistsRequestID == requestID && offlineScope == scope && socialSession == session
     }
 
     func isLiked(_ trackID: Int) -> Bool {
@@ -255,7 +349,17 @@ final class AccountStore: ObservableObject {
             userPlaylists = []
             likedAlbums = []
             likedArtists = []
+            sublistsRequestID = UUID()
+            sublistsTask?.cancel()
+            sublistsTask = nil
+            sublistsScope = nil
+            sublistsSession = nil
+            hasLoadedLikedAlbums = false
+            hasLoadedLikedArtists = false
+            isRefreshingSublists = false
+            sublistsError = nil
             PlayerService.shared.activateAccount(scope: offlineScope)
+            CloudContent.shared.activateAccount(scope: authenticatedAccountID.map { "netease:\($0)" }, session: socialSession)
         }
         DownloadManager.shared.activate(accountScope: offlineScope)
     }
@@ -264,7 +368,9 @@ final class AccountStore: ObservableObject {
         guard let profile, let binding = profileBinding, binding == NeteaseClient.shared.authenticationFingerprint else { return }
         try? AccountSnapshotStorage.shared.save(.init(authenticationFingerprint: binding, profile: profile,
                                                       likedTrackIDs: likedTrackIDs, playlists: userPlaylists,
-                                                      savedAt: Date(), membership: membership))
+                                                      savedAt: Date(), membership: membership,
+                                                      likedAlbums: hasLoadedLikedAlbums ? likedAlbums : nil,
+                                                      likedArtists: hasLoadedLikedArtists ? likedArtists : nil))
     }
 
     /// Refresh the login cookie at most once per calendar day.

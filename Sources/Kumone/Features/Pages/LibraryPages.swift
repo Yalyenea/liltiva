@@ -3,9 +3,8 @@ import SwiftUI
 // MARK: - 最近播放
 
 struct RecentsView: View {
-    @State private var records: [PlayRecordItem] = []
+    @StateObject private var model = CachedContent<[PlayRecordItem]>()
     @State private var week = false
-    @State private var isLoading = true
 
     @EnvironmentObject private var account: AccountStore
     private let player = PlayerService.shared
@@ -34,16 +33,29 @@ struct RecentsView: View {
                     }
                     .buttonStyle(.pressable)
                     .disabled(records.isEmpty)
+                    Button { Task { await load(force: true) } } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("刷新").help("刷新")
+                        .disabled(model.isRefreshing || account.authenticatedAccountID == nil)
                 }
                 .padding(.horizontal, Theme.Layout.contentInset)
                 .padding(.top, 12)
 
-                if isLoading {
+                if model.isLoading {
                     ProgressView()
                         .frame(maxWidth: .infinity, minHeight: 300)
+                } else if let error = model.error, model.value == nil {
+                    ErrorStateView(message: error) { Task { await load(force: true) } }
+                        .frame(minHeight: 300)
                 } else if records.isEmpty {
                     EmptyStateView(icon: "clock", title: "暂无播放记录")
                         .frame(minHeight: 300)
+                }
+                if let error = model.error, model.value != nil {
+                    HStack {
+                        Text(error).foregroundStyle(.secondary)
+                        Button("重试") { Task { await load(force: true) } }
+                    }.font(.callout).padding(.horizontal, Theme.Layout.contentInset)
                 }
             }
         } rows: { layout in
@@ -53,7 +65,7 @@ struct RecentsView: View {
             PlayerClearanceSpacer()
         }
         .navigationTitle("最近播放")
-        .task(id: week) {
+        .task(id: "\(account.socialSession ?? "guest"):\(week)") {
             await load()
         }
     }
@@ -84,23 +96,29 @@ struct RecentsView: View {
         }
     }
 
-    private func load() async {
-        guard let uid = account.profile?.userId else {
-            isLoading = false
-            return
-        }
-        isLoading = records.isEmpty
-        records = (try? await NeteaseAPI.playRecords(uid: uid, week: week)) ?? []
-        isLoading = false
+    private var records: [PlayRecordItem] {
+        model.scope == account.offlineScope && account.authenticatedAccountID != nil ? model.value ?? [] : []
+    }
+
+    private func load(force: Bool = false) async {
+        let uid = account.authenticatedAccountID
+        let session = account.socialSession
+        let scope = uid == nil ? nil : account.offlineScope
+        let requestedWeek = week
+        await model.load(key: "records:\(uid ?? 0):\(requestedWeek)", scope: scope, session: session,
+            maxAge: 60, force: force,
+            current: { account.offlineScope == scope && account.socialSession == session && week == requestedWeek }) {
+                guard let uid else { throw NeteaseAPIError.needLogin }
+                return try await NeteaseAPI.playRecords(uid: uid, week: requestedWeek)
+            }
     }
 }
 
 // MARK: - 音乐云盘
 
 struct CloudView: View {
-    @State private var items: [CloudSongItem] = []
-    @State private var sizeInfo: String?
-    @State private var isLoading = true
+    @ObservedObject private var model = CloudContent.shared
+    @EnvironmentObject private var account: AccountStore
 
     private let player = PlayerService.shared
 
@@ -125,18 +143,37 @@ struct CloudView: View {
                             .background(Theme.accentGradient, in: Capsule())
                     }
                     .buttonStyle(.pressable)
-                    .disabled(items.isEmpty)
+                    .disabled(displayed.isEmpty)
+                    Button { Task { await model.load(force: true) } } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("刷新").help("刷新")
+                        .disabled(model.isRefreshing || account.authenticatedAccountID == nil)
+                    if model.isRefreshing, !model.isLoading {
+                        ProgressView().controlSize(.small)
+                    }
                 }
                 .padding(.horizontal, Theme.Layout.contentInset)
                 .padding(.top, 12)
 
-                if isLoading {
+                if model.isLoading {
                     ProgressView()
                         .frame(maxWidth: .infinity, minHeight: 300)
-                } else if items.isEmpty {
+                } else if let message = model.errorMessage, model.snapshot == nil {
+                    ErrorStateView(message: message) { Task { await model.load(force: true) } }
+                        .frame(minHeight: 300)
+                } else if displayed.isEmpty {
                     EmptyStateView(icon: "icloud", title: "云盘还没有歌曲",
                                    subtitle: "在网易云音乐客户端上传的歌曲会出现在这里")
                         .frame(minHeight: 300)
+                }
+                if let message = model.errorMessage, model.snapshot != nil {
+                    HStack(spacing: 8) {
+                        Text(message).foregroundStyle(.secondary)
+                        Button("重试") { Task { await model.load(force: true) } }
+                            .disabled(model.isRefreshing)
+                    }
+                    .font(.system(size: 12))
+                    .padding(.horizontal, Theme.Layout.contentInset)
                 }
             }
         } rows: { layout in
@@ -146,27 +183,18 @@ struct CloudView: View {
             PlayerClearanceSpacer()
         }
         .navigationTitle("音乐云盘")
-        .task {
-            if items.isEmpty {
-                await load()
-            }
-        }
+        .task(id: account.socialSession) { await model.load() }
     }
 
     private var tracks: [Track] {
-        items.compactMap(\.simpleSong)
+        model.loadedScope == account.offlineScope ? model.tracks : []
     }
 
-    private func load() async {
-        isLoading = items.isEmpty
-        if let response = try? await NeteaseAPI.cloudSongs() {
-            items = response.data ?? []
-            if let size = response.size, let max = response.maxSize, max > 0 {
-                let used = String(format: "%.1f", Double(size) / 1_073_741_824)
-                let total = String(format: "%.0f", Double(max) / 1_073_741_824)
-                sizeInfo = String(localized: "已使用 \(used) GB / \(total) GB")
-            }
-        }
-        isLoading = false
+    private var sizeInfo: String? {
+        guard model.loadedScope == account.offlineScope,
+              let size = model.snapshot?.size, let max = model.snapshot?.maxSize, max > 0 else { return nil }
+        let used = String(format: "%.1f", Double(size) / 1_073_741_824)
+        let total = String(format: "%.0f", Double(max) / 1_073_741_824)
+        return String(localized: "已使用 \(used) GB / \(total) GB")
     }
 }

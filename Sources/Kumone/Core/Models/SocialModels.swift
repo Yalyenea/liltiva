@@ -9,7 +9,9 @@ struct SocialPage<Item> {
     let nextCursor: Int?
 }
 
-struct UserOverview: Decodable {
+extension SocialPage: Codable where Item: Codable {}
+
+struct UserOverview: Codable {
     let profile: UserProfile
     let level: Int?
     let listenSongs: Int?
@@ -19,7 +21,7 @@ struct UserOverview: Decodable {
 /// Messages and events carry their content as JSON inside a JSON string.
 /// Decode only presentation data; preserve unsupported kinds as an explicit
 /// placeholder instead of exposing protocol JSON in the interface.
-struct SocialContent: Decodable {
+struct SocialContent: Codable {
     let msg: String?
     let title: String?
     let content: String?
@@ -29,7 +31,7 @@ struct SocialContent: Decodable {
     let event: ForwardedEvent?
     let user: UserProfile?
 
-    struct ForwardedEvent: Decodable {
+    struct ForwardedEvent: Codable {
         let user: UserProfile?
         let json: String?
     }
@@ -49,8 +51,8 @@ struct SocialContent: Decodable {
     }
 }
 
-struct SocialResource: Decodable {
-    enum Kind { case song, playlist, album }
+struct SocialResource: Codable {
+    enum Kind: String, Codable { case song, playlist, album }
     let id: Int
     let name: String?
     let picUrl: String?
@@ -61,7 +63,7 @@ struct SocialResource: Decodable {
     var imageURL: URL? { (picUrl ?? coverImgUrl ?? imgUrl)?.resizedImageURL(160) }
 }
 
-struct SocialEvent: Decodable, Identifiable {
+struct SocialEvent: Codable, Identifiable {
     let id: Int
     let user: UserProfile
     let eventTime: Double
@@ -70,11 +72,11 @@ struct SocialEvent: Decodable, Identifiable {
     let payload: SocialContent?
     let forwardedContent: SocialContent?
 
-    struct Info: Decodable {
+    struct Info: Codable {
         let commentCount: Int?
         let likedCount: Int?
     }
-    struct Picture: Decodable { let originUrl: String?; let squareUrl: String? }
+    struct Picture: Codable { let originUrl: String?; let squareUrl: String? }
     private enum CodingKeys: String, CodingKey { case id, user, eventTime, info, pics, json }
 
     init(from decoder: Decoder) throws {
@@ -87,9 +89,22 @@ struct SocialEvent: Decodable, Identifiable {
         payload = try SocialContent.parse(c.decodeIfPresent(String.self, forKey: .json))
         forwardedContent = try SocialContent.parse(payload?.event?.json)
     }
+
+    // Store the same nested JSON shape accepted by the network decoder.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(user, forKey: .user)
+        try c.encode(eventTime, forKey: .eventTime)
+        try c.encodeIfPresent(info, forKey: .info)
+        try c.encodeIfPresent(pics, forKey: .pics)
+        if let payload {
+            try c.encode(String(decoding: JSONEncoder().encode(payload), as: UTF8.self), forKey: .json)
+        }
+    }
 }
 
-struct PrivateConversation: Identifiable {
+struct PrivateConversation: Codable, Identifiable {
     var id: Int { user.userId }
     let user: UserProfile
     let content: SocialContent?
@@ -97,7 +112,7 @@ struct PrivateConversation: Identifiable {
     let unread: Int
 }
 
-struct PrivateConversationRecord: Decodable {
+struct PrivateConversationRecord: Codable {
     let fromUser: UserProfile
     let toUser: UserProfile
     let lastMsg: String?
@@ -110,7 +125,7 @@ struct PrivateConversationRecord: Decodable {
     }
 }
 
-struct PrivateMessage: Decodable, Identifiable {
+struct PrivateMessage: Codable, Identifiable {
     let id: Int
     let fromUser: UserProfile
     let time: Double
@@ -124,9 +139,19 @@ struct PrivateMessage: Decodable, Identifiable {
         time = try c.decode(Double.self, forKey: .time)
         content = try SocialContent.parse(c.decodeIfPresent(String.self, forKey: .msg))
     }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(fromUser, forKey: .fromUser)
+        try c.encode(time, forKey: .time)
+        if let content {
+            try c.encode(String(decoding: JSONEncoder().encode(content), as: UTF8.self), forKey: .msg)
+        }
+    }
 }
 
-struct SocialNotification: Identifiable {
+struct SocialNotification: Codable, Identifiable {
     let id: String
     let user: UserProfile?
     let time: Double
@@ -136,7 +161,7 @@ struct SocialNotification: Identifiable {
     let resourceKind: SocialResource.Kind?
 }
 
-struct CommentNotification: Decodable {
+struct CommentNotification: Codable {
     let commentId: Int
     let combindId: String?
     let user: UserProfile
@@ -162,7 +187,7 @@ struct CommentNotification: Decodable {
     }
 }
 
-struct MentionNotification: Decodable {
+struct MentionNotification: Codable {
     let id: Int
     let user: UserProfile?
     let time: Double?
@@ -177,12 +202,12 @@ struct MentionNotification: Decodable {
     }
 }
 
-struct NoticeNotification: Decodable {
+struct NoticeNotification: Codable {
     let id: Int
     let time: Double
     let notice: String
 
-    private struct Content: Decodable {
+    private struct Content: Codable {
         let user: UserProfile?
         let content: String?
         let title: String?
@@ -192,8 +217,8 @@ struct NoticeNotification: Decodable {
         let comment: Comment?
         let generalNotice: GeneralNotice?
 
-        struct Comment: Decodable { let content: String? }
-        struct GeneralNotice: Decodable { let actionDesc: String?; let content: String? }
+        struct Comment: Codable { let content: String? }
+        struct GeneralNotice: Codable { let actionDesc: String?; let content: String? }
 
         var text: String {
             if let generalNotice {
@@ -216,7 +241,7 @@ struct NoticeNotification: Decodable {
     }
 }
 
-struct MessageCounts: Decodable, Equatable {
+struct MessageCounts: Codable, Equatable {
     let msg: Int
     let comment: Int
     let forward: Int

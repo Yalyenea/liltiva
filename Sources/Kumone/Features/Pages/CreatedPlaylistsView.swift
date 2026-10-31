@@ -38,9 +38,8 @@ struct CreatedPlaylistsView: View {
                             .contextMenu {
                                 Button("播放") {
                                     Task {
-                                        if let detail = try? await NeteaseAPI.playlistDetail(id: playlist.id) {
-                                            await playPlaylist(detail)
-                                        }
+                                        do { try await PlaylistPlayback.start(id: playlist.id) }
+                                        catch { ToastCenter.shared.show(error.localizedDescription) }
                                     }
                                 }
                                 Divider()
@@ -79,14 +78,4 @@ struct CreatedPlaylistsView: View {
         }
     }
 
-    private func playPlaylist(_ detail: NeteaseAPI.PlaylistDetailResponse) async {
-        var tracks = detail.playlist.tracks
-        if tracks.count < detail.playlist.trackCount {
-            let ids = detail.playlist.trackIds.map(\.id)
-            if let full = try? await NeteaseAPI.songDetails(ids: Array(ids.prefix(1000))) {
-                tracks = full.songs
-            }
-        }
-        PlayerService.shared.play(tracks: tracks, source: .playlist(detail.playlist.id))
-    }
 }

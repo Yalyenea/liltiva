@@ -14,7 +14,7 @@ struct CommentsPanel: View {
 
     init(track: Track) {
         self.track = track
-        _model = StateObject(wrappedValue: TrackCommentsModel(trackID: track.id))
+        _model = StateObject(wrappedValue: TrackCommentsModel(trackID: track.id, cache: .shared))
     }
 
     var body: some View {
@@ -47,7 +47,7 @@ struct CommentsPanel: View {
         .noFocusRing()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("track-comments-panel")
-        .task(id: account.socialSession) { await model.refresh() }
+        .task(id: account.socialSession) { await model.refresh(force: false) }
         .onChange(of: account.socialSession) { _, _ in
             draft = ""; replyingTo = nil; deleting = nil
         }

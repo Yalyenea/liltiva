@@ -1401,7 +1401,7 @@ final class PlayerService: ObservableObject {
             applyLyrics(saved)
         }
         guard !usesOfflineQueue else { return }
-        let response = try? await NeteaseAPI.lyric(id: track.id)
+        let response = try? await NeteaseAPI.cachedLyrics(id: track.id)
         guard generation == resolveGeneration, let response else { return }
         applyLyrics(response)
         // The engine caches every song it streams, so each one may play offline.
@@ -1651,7 +1651,13 @@ final class PlayerService: ObservableObject {
     }
 
     func resolve(_ context: PlayContext) async throws -> (tracks: [Track], source: PlaySource)? {
-        try await OfflineContextResolver.resolve(context, offline: usesOfflineQueue) { try await resolveOnline(context) }
+        let scope = AccountStore.shared.offlineScope
+        let session = NeteaseClient.shared.authenticationFingerprint
+        let result = try await OfflineContextResolver.resolve(context, offline: usesOfflineQueue) { try await resolveOnline(context) }
+        guard scope == AccountStore.shared.offlineScope, session == NeteaseClient.shared.authenticationFingerprint else {
+            throw CancellationError()
+        }
+        return result
     }
 
     private func resolveOnline(_ context: PlayContext) async throws -> (tracks: [Track], source: PlaySource)? {
@@ -1659,17 +1665,21 @@ final class PlayerService: ObservableObject {
         case .fm:
             return nil
         case .album:
-            return (try await NeteaseAPI.album(id: context.id).songs, .album(context.id))
+            return (try await NeteaseAPI.cachedAlbum(id: context.id).songs, .album(context.id))
         case .artist:
-            return (try await NeteaseAPI.artist(id: context.id).hotSongs, .artist(context.id))
+            return (try await NeteaseAPI.cachedArtist(id: context.id).hotSongs, .artist(context.id))
         case .daily:
-            return (try await NeteaseAPI.dailyRecommendSongs(), .daily)
+            return (try await NeteaseAPI.cachedDailyRecommendSongs(), .daily)
         case .cloud:
-            let songs = try await NeteaseAPI.cloudSongs().data?.compactMap(\.simpleSong) ?? []
-            return (songs, .cloud)
+            await CloudContent.shared.load()
+            guard CloudContent.shared.loadedScope == AccountStore.shared.offlineScope,
+                  let snapshot = CloudContent.shared.snapshot else {
+                throw NeteaseAPIError.business(code: 0, message: CloudContent.shared.errorMessage)
+            }
+            return (snapshot.items.compactMap(\.simpleSong), .cloud)
         case .recents:
             guard let uid = AccountStore.shared.profile?.userId else { return nil }
-            return (try await NeteaseAPI.playRecords(uid: uid, week: false).map(\.song), .none)
+            return (try await NeteaseAPI.cachedPlayRecords(uid: uid, week: false).map(\.song), .none)
         case .heartbeat:
             // Regenerated from a fresh seed, the same way the Home card does it.
             guard let liked = AccountStore.shared.likedSongsPlaylist,

@@ -254,7 +254,7 @@ final class QueuePrefetcher {
     /// The words and artwork a cached song shows offline, like a download.
     static func keepPlaybackData(track: Track, scope: String?) async {
         guard let scope else { return }
-        let lyrics = try? await NeteaseAPI.lyric(id: track.id)
+        let lyrics = try? await NeteaseAPI.cachedLyrics(id: track.id)
         guard !Task.isCancelled else { return }
         await OfflineMetadataStore.shared.keepPlaybackData(track: track, lyrics: lyrics, scope: scope)
     }

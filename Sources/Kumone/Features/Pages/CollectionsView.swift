@@ -11,23 +11,44 @@ struct CollectionsView: View {
     }
 
     @State private var tab: Tab = .playlists
-    @State private var isLoading = true
 
     @EnvironmentObject private var account: AccountStore
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Picker("收藏分类", selection: $tab) {
-                    ForEach(Tab.allCases) { tab in
-                        Text(LocalizedStringKey(tab.rawValue)).tag(tab)
+                HStack(spacing: 12) {
+                    Picker("收藏分类", selection: $tab) {
+                        ForEach(Tab.allCases) { tab in
+                            Text(LocalizedStringKey(tab.rawValue)).tag(tab)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 216)
+                    if account.isRefreshingSublists {
+                        ProgressView().controlSize(.small)
+                    }
+                    Spacer()
+                    Button { Task { await account.refreshSublists(force: true) } } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .accessibilityLabel("刷新")
+                    .help("刷新")
+                    .disabled(account.isRefreshingSublists)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 216)
                 .padding(.horizontal, Theme.Layout.contentInset)
                 .padding(.top, 12)
+
+                if tab != .playlists, let error = account.sublistsError {
+                    HStack(spacing: 8) {
+                        Text(error).foregroundStyle(.secondary)
+                        Button("重试") { Task { await account.refreshSublists(force: true) } }
+                            .disabled(account.isRefreshingSublists)
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, Theme.Layout.contentInset)
+                }
 
                 if isSelectedTabLoading {
                     ProgressView()
@@ -103,17 +124,16 @@ struct CollectionsView: View {
             }
         }
         .navigationTitle("我的收藏")
-        .task {
+        .task(id: account.socialSession) {
             await account.refreshSublists()
-            isLoading = false
         }
     }
 
     private var isSelectedTabLoading: Bool {
         switch tab {
         case .playlists: return !account.isBootstrapped && account.subscribedPlaylists.isEmpty
-        case .albums: return isLoading && account.likedAlbums.isEmpty
-        case .artists: return isLoading && account.likedArtists.isEmpty
+        case .albums: return account.isRefreshingSublists && !account.hasLoadedLikedAlbums
+        case .artists: return account.isRefreshingSublists && !account.hasLoadedLikedArtists
         }
     }
 }

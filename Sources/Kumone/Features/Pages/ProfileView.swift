@@ -60,7 +60,7 @@ struct ProfileView: View {
             } else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
         }
         .navigationTitle("个人主页")
-        .task(id: account.socialSession) { overview = nil; error = nil; await load() }
+        .task(id: account.socialSession) { await load(force: false) }
     }
 
     private func header(_ overview: UserOverview) -> some View {
@@ -160,16 +160,28 @@ struct ProfileView: View {
         }
     }
 
-    private func load() async {
-        guard let session = account.socialSession else { overview = nil; return }
+    private func load(force: Bool = true) async {
+        guard let session = account.socialSession, let scope = account.offlineScope else { overview = nil; return }
         generation += 1
         let ticket = generation
         loading = true
         error = nil
         defer { if ticket == generation { loading = false } }
         do {
-            let value = try await NeteaseAPI.userOverview(uid: userID)
-            guard ticket == generation, session == account.socialSession, !Task.isCancelled else { return }
+            let key = "profile-overview:\(userID)"
+            if overviewSession != session || overview == nil,
+               let cached = await PageDataCache.shared.load(UserOverview.self, key: key, scope: scope) {
+                guard ticket == generation, session == account.socialSession, scope == account.offlineScope, !Task.isCancelled else { return }
+                overview = cached.value
+                overviewSession = session
+            }
+            let value = try await PageDataCache.shared.fetch(UserOverview.self, key: key, scope: scope,
+                                                            maxAge: 60, force: force, session: session) {
+                let value = try await NeteaseAPI.userOverview(uid: userID)
+                guard session == account.socialSession, scope == account.offlineScope, !Task.isCancelled else { throw CancellationError() }
+                return value
+            }
+            guard ticket == generation, session == account.socialSession, scope == account.offlineScope, !Task.isCancelled else { return }
             overview = value
             overviewSession = session
             error = nil
@@ -191,7 +203,7 @@ private struct ProfilePlaylistsView: View {
     init(userID: Int, availableWidth: CGFloat) {
         self.userID = userID
         self.availableWidth = availableWidth
-        _model = StateObject(wrappedValue: SocialPageModel { try await NeteaseAPI.socialPlaylists(uid: userID, cursor: $0) })
+        _model = StateObject(wrappedValue: SocialPageModel(cacheKey: "profile-playlists:\(userID)") { try await NeteaseAPI.socialPlaylists(uid: userID, cursor: $0) })
     }
     private var displayed: [PlaylistSummary] {
         model.items.filter { saved ? $0.creator?.userId != userID : $0.creator?.userId == userID }
@@ -222,7 +234,7 @@ private struct ProfilePlaylistsView: View {
                 }
                 SocialPageFooter(model: model)
             }
-        }.task(id: account.socialSession) { await model.refresh() }
+        }.task(id: account.socialSession) { await model.refresh(force: false) }
     }
 }
 
@@ -258,7 +270,7 @@ struct SocialPeopleView: View {
 
     init(userID: Int, followers: Bool) {
         self.userID = userID; self.followers = followers
-        _model = StateObject(wrappedValue: SocialPageModel { try await NeteaseAPI.socialUsers(uid: userID, followers: followers, cursor: $0) })
+        _model = StateObject(wrappedValue: SocialPageModel(cacheKey: "profile-people:\(userID):\(followers)") { try await NeteaseAPI.socialUsers(uid: userID, followers: followers, cursor: $0) })
     }
     var body: some View {
         Group {
@@ -288,7 +300,7 @@ struct SocialPeopleView: View {
             }
         }
         .navigationTitle(followers ? "粉丝" : "关注的人")
-        .task(id: account.socialSession) { await model.refresh() }
+        .task(id: account.socialSession) { await model.refresh(force: false) }
     }
 }
 
@@ -299,7 +311,7 @@ struct SocialEventsView: View {
 
     init(userID: Int?) {
         self.userID = userID
-        _model = StateObject(wrappedValue: SocialPageModel { try await NeteaseAPI.socialEvents(uid: userID, cursor: $0) })
+        _model = StateObject(wrappedValue: SocialPageModel(cacheKey: "profile-events:\(userID.map(String.init) ?? "feed")") { try await NeteaseAPI.socialEvents(uid: userID, cursor: $0) })
     }
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 18) {
@@ -313,7 +325,7 @@ struct SocialEventsView: View {
                 }
                 SocialPageFooter(model: model)
             }
-        }.task(id: account.socialSession) { await model.refresh() }
+        }.task(id: account.socialSession) { await model.refresh(force: false) }
     }
 }
 
@@ -368,6 +380,8 @@ private struct UserRankingView: View {
     @EnvironmentObject private var account: AccountStore
     @State private var week = true
     @State private var records: [PlayRecordItem] = []
+    @State private var loadedWeek: Bool?
+    @State private var generation = 0
     @State private var session: String?
     @State private var error: String?
     @State private var loading = false
@@ -378,7 +392,7 @@ private struct UserRankingView: View {
                 SocialFilterButton(title: "最近一周", selected: week) { week = true }
                 SocialFilterButton(title: "所有时间", selected: !week) { week = false }
             }.padding(.leading, -11)
-            if session == account.socialSession {
+            if session == account.socialSession, loadedWeek == week {
                 ForEach(Array(records.enumerated()), id: \.element.song.id) { index, record in
                     TrackRow(track: record.song, index: index + 1, totalCount: records.count,
                              style: .compact, trailingText: String(localized: "\(record.playCount) 次")) {
@@ -390,20 +404,28 @@ private struct UserRankingView: View {
             else if let error { ErrorStateView(message: error) { Task { await load() } } }
             else if records.isEmpty { EmptyStateView(icon: "chart.bar", title: "暂无播放记录").frame(minHeight: 180) }
         }
-        .task(id: "\(account.socialSession ?? "guest"):\(week)") { await load() }
+        .task(id: "\(account.socialSession ?? "guest"):\(week)") { await load(force: false) }
     }
-    private func load() async {
-        guard let binding = account.socialSession else { records = []; return }
-        records = []; error = nil; loading = true
+    private func load(force: Bool = true) async {
+        guard let binding = account.socialSession, let scope = account.offlineScope else { records = []; return }
+        generation += 1
+        let ticket = generation
+        error = nil; loading = true
         let requestedWeek = week
+        defer { if ticket == generation { loading = false } }
+        if session != binding || loadedWeek != requestedWeek { records = [] }
+        let key = "records:\(userID):\(requestedWeek)"
+        if let cached = await PageDataCache.shared.load([PlayRecordItem].self, key: key, scope: scope) {
+            guard ticket == generation, binding == account.socialSession, requestedWeek == week, scope == account.offlineScope, !Task.isCancelled else { return }
+            records = cached.value; session = binding; loadedWeek = requestedWeek
+        }
         do {
-            let values = try await NeteaseAPI.playRecords(uid: userID, week: requestedWeek)
-            guard binding == account.socialSession, requestedWeek == week, !Task.isCancelled else { return }
-            records = values; session = binding
+            let values = try await NeteaseAPI.cachedPlayRecords(uid: userID, week: requestedWeek, force: force)
+            guard ticket == generation, binding == account.socialSession, requestedWeek == week, scope == account.offlineScope, !Task.isCancelled else { return }
+            records = values; session = binding; loadedWeek = requestedWeek
         } catch {
-            guard binding == account.socialSession, requestedWeek == week, !Task.isCancelled else { return }
+            guard ticket == generation, binding == account.socialSession, requestedWeek == week, !Task.isCancelled else { return }
             self.error = error.localizedDescription
         }
-        loading = false
     }
 }

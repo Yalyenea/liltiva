@@ -8,9 +8,12 @@ struct AlbumDetailView: View {
     @State private var otherAlbums: [AlbumSummary] = []
     @State private var isSubscribed = false
     @State private var isLoading = true
+    @State private var isRefreshing = false
     @State private var errorMessage: String?
     @State private var showFullDescription = false
     @State private var loadGeneration = 0
+    @State private var contentIdentity: String?
+    @State private var isSubscribing = false
     @ObservedObject private var downloads = DownloadManager.shared
 
     private let player = PlayerService.shared
@@ -27,17 +30,17 @@ struct AlbumDetailView: View {
 
     var body: some View {
         Group {
-            if let savedCollectionID, !downloads.network.connected || errorMessage != nil {
+            if album == nil, let savedCollectionID, !downloads.network.connected || errorMessage != nil {
                 DownloadedMusicView(collectionID: savedCollectionID)
             } else { onlineContent }
         }
-        .task(id: "\(albumID):\(downloads.network.connected)") {
-            if downloads.network.connected || savedCollectionID == nil { await load() }
+        .task(id: "\(albumID):\(account.offlineScope ?? "unbound"):\(account.socialSession ?? "guest"):\(downloads.network.connected)") {
+            await load()
         }
         .toolbar {
             if errorMessage != nil, downloads.network.connected, album != nil || savedCollectionID != nil {
                 ToolbarItem(placement: .primaryAction) {
-                    Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
+                    Button { Task { await load(force: true) } } label: { Image(systemName: "arrow.clockwise") }
                         .accessibilityLabel("重试")
                         .help("重试")
                 }
@@ -50,11 +53,18 @@ struct AlbumDetailView: View {
             if let album {
 
                     regularHeader(album).padding(.horizontal, Theme.Layout.contentInset).padding(.top, 16)
+                    if let errorMessage {
+                    HStack {
+                        Text(errorMessage).foregroundStyle(.secondary)
+                        Button("重试") { Task { await load(force: true) } }
+                            .disabled(isRefreshing)
+                    }.font(.caption).padding(.horizontal, Theme.Layout.contentInset)
+                    }
 
             } else if isLoading {
                 loadingHeader
             } else if let errorMessage {
-                ErrorStateView(message: errorMessage) { Task { await load() } }
+                ErrorStateView(message: errorMessage) { Task { await load(force: true) } }
                     .frame(minHeight: 400)
             }
         } rows: { layout in
@@ -91,31 +101,97 @@ struct AlbumDetailView: View {
         .navigationTitle(album?.name ?? String(localized: "专辑"))
     }
 
-    private func load() async {
+    private func load(force: Bool = false) async {
+        let scope = account.offlineScope
+        let session = NeteaseClient.shared.authenticationFingerprint
+        let identity = "\(albumID):\(scope ?? "unbound"):\(session ?? "guest")"
+        // A reconnect cannot race a subscription that is still being committed.
+        guard !isSubscribing || contentIdentity != identity else { return }
         loadGeneration += 1
         let generation = loadGeneration
-        isLoading = true
+        if contentIdentity != identity {
+            album = nil
+            tracks = []
+            otherAlbums = []
+            isSubscribed = false
+            isSubscribing = false
+            contentIdentity = identity
+        }
+        isLoading = album == nil
+        isRefreshing = true
         errorMessage = nil
-        defer { if generation == loadGeneration { isLoading = false } }
+        defer {
+            if generation == loadGeneration {
+                isLoading = false
+                isRefreshing = false
+            }
+        }
+        if let scope {
+            let cached = await PageDataCache.shared.load(AlbumDetailResponse.self, key: "album:\(albumID)", scope: scope)
+            guard isCurrent(generation, scope: scope, session: session) else { return }
+            if let cached {
+                album = cached.value.album
+                tracks = cached.value.songs
+                isLoading = false
+            }
+            let subscription = await PageDataCache.shared.load(Bool.self, key: "album-subscription:\(albumID)", scope: scope)
+            guard isCurrent(generation, scope: scope, session: session) else { return }
+            if let subscription { isSubscribed = subscription.value }
+            if let artistID = album?.artist?.id {
+                let cachedAlbums = await PageDataCache.shared.load([AlbumSummary].self, key: "artist-albums:\(artistID):12", scope: scope)
+                guard isCurrent(generation, scope: scope, session: session) else { return }
+                if let cachedAlbums { otherAlbums = cachedAlbums.value.filter { $0.id != albumID } }
+            }
+        }
+        if !downloads.network.connected {
+            if album == nil { errorMessage = URLError(.notConnectedToInternet).localizedDescription }
+            return
+        }
         do {
-            let response = try await NeteaseAPI.album(id: albumID)
-            guard generation == loadGeneration, !Task.isCancelled else { return }
+            let response = try await NeteaseAPI.cachedAlbum(id: albumID, force: force)
+            guard isCurrent(generation, scope: scope, session: session) else { return }
             album = response.album
             tracks = response.songs
             isLoading = false
-            if let dynamic = try? await NeteaseAPI.albumDynamic(id: albumID) {
-                guard generation == loadGeneration, !Task.isCancelled else { return }
-                isSubscribed = dynamic.isSub ?? false
+            if let scope {
+                do {
+                    let subscribed = try await PageDataCache.shared.fetch(
+                        Bool.self, key: "album-subscription:\(albumID)", scope: scope,
+                        maxAge: 300, force: force, session: session,
+                        loader: {
+                            guard account.offlineScope == scope, NeteaseClient.shared.authenticationFingerprint == session else { throw CancellationError() }
+                            let subscribed = try await NeteaseAPI.albumDynamic(id: albumID).isSub ?? false
+                            // A response from a previous login cannot populate this account's disk cache.
+                            guard account.offlineScope == scope, NeteaseClient.shared.authenticationFingerprint == session else { throw CancellationError() }
+                            return subscribed
+                        }
+                    )
+                    guard isCurrent(generation, scope: scope, session: session) else { return }
+                    isSubscribed = subscribed
+                } catch {
+                    guard isCurrent(generation, scope: scope, session: session) else { return }
+                    errorMessage = error.localizedDescription
+                }
             }
-            if let artistID = response.album.artist?.id,
-               let albums = try? await NeteaseAPI.artistAlbums(id: artistID, limit: 12) {
-                guard generation == loadGeneration, !Task.isCancelled else { return }
-                otherAlbums = albums.hotAlbums.filter { $0.id != albumID }
+            if let artistID = response.album.artist?.id {
+                do {
+                    let albums = try await NeteaseAPI.cachedArtistAlbums(id: artistID, limit: 12, force: force)
+                    guard isCurrent(generation, scope: scope, session: session) else { return }
+                    otherAlbums = albums.filter { $0.id != albumID }
+                } catch {
+                    guard isCurrent(generation, scope: scope, session: session) else { return }
+                    errorMessage = error.localizedDescription
+                }
             }
         } catch {
-            guard generation == loadGeneration, !Task.isCancelled else { return }
+            guard isCurrent(generation, scope: scope, session: session) else { return }
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func isCurrent(_ generation: Int, scope: String?, session: String?) -> Bool {
+        generation == loadGeneration && !Task.isCancelled
+            && account.offlineScope == scope && NeteaseClient.shared.authenticationFingerprint == session
     }
 
     // MARK: - Compact Header
@@ -202,6 +278,7 @@ struct AlbumDetailView: View {
                                 .background(.primary.opacity(0.06), in: Capsule())
                         }
                         .buttonStyle(.pressable)
+                        .disabled(isRefreshing || isSubscribing)
                     }
                 }
             }
@@ -216,12 +293,24 @@ struct AlbumDetailView: View {
     }
 
     private func toggleSubscribe() {
+        guard !isSubscribing, !isRefreshing, let scope = account.offlineScope else { return }
+        let session = NeteaseClient.shared.authenticationFingerprint
+        let generation = loadGeneration
+        let subscribed = !isSubscribed
+        isSubscribing = true
         Task {
+            defer { if isCurrent(generation, scope: scope, session: session) { isSubscribing = false } }
             do {
-                try await NeteaseAPI.subscribeAlbum(id: albumID, subscribe: !isSubscribed)
-                isSubscribed.toggle()
+                guard isCurrent(generation, scope: scope, session: session) else { return }
+                try await NeteaseAPI.subscribeAlbum(id: albumID, subscribe: subscribed)
+                guard isCurrent(generation, scope: scope, session: session) else { return }
+                isSubscribed = subscribed
+                try? await PageDataCache.shared.save(subscribed, key: "album-subscription:\(albumID)", scope: scope)
+                guard isCurrent(generation, scope: scope, session: session) else { return }
                 ToastCenter.shared.show(isSubscribed ? String(localized: "已收藏专辑") : String(localized: "已取消收藏"))
+                await account.refreshSublists(force: true)
             } catch {
+                guard isCurrent(generation, scope: scope, session: session) else { return }
                 ToastCenter.shared.show(error.localizedDescription)
             }
         }

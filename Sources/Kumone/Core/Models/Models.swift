@@ -170,7 +170,7 @@ struct PlaylistDetail: Codable, Hashable {
 
 // MARK: - Album / Artist
 
-struct AlbumSummary: Decodable, Hashable, Identifiable {
+struct AlbumSummary: Codable, Hashable, Identifiable {
     let id: Int
     let name: String
     let picUrl: String?
@@ -213,14 +213,27 @@ struct AlbumSummary: Decodable, Hashable, Identifiable {
         let date = Date(timeIntervalSince1970: TimeInterval(publishTime) / 1000)
         return String(Calendar.current.component(.year, from: date))
     }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encodeIfPresent(picUrl, forKey: .picUrl)
+        // Keep the API's nested shape so the same decoder reads disk snapshots.
+        try c.encode(ArtistName(name: artistName), forKey: .artist)
+        try c.encode(publishTime, forKey: .publishTime)
+        try c.encode(size, forKey: .size)
+        try c.encodeIfPresent(subType, forKey: .subType)
+        try c.encode(alias, forKey: .alias)
+    }
 }
 
-struct AlbumDetailResponse: Decodable {
+struct AlbumDetailResponse: Codable {
     let album: AlbumDetail
     let songs: [Track]
 }
 
-struct AlbumDetail: Decodable, Hashable {
+struct AlbumDetail: Codable, Hashable {
     let id: Int
     let name: String
     let picUrl: String?
@@ -249,7 +262,7 @@ struct AlbumDetail: Decodable, Hashable {
     }
 }
 
-struct ArtistSummary: Decodable, Hashable, Identifiable {
+struct ArtistSummary: Codable, Hashable, Identifiable {
     let id: Int
     let name: String
     let picUrl: String?
@@ -257,7 +270,7 @@ struct ArtistSummary: Decodable, Hashable, Identifiable {
     let musicSize: Int
     let briefDesc: String?
     let alias: [String]
-    let followed: Bool
+    var followed: Bool
 
     private enum CodingKeys: String, CodingKey {
         case id, name, picUrl, img1v1Url, cover, avatar, albumSize, musicSize, briefDesc, alias, followed
@@ -277,11 +290,23 @@ struct ArtistSummary: Decodable, Hashable, Identifiable {
         alias = (try? c.decode([String].self, forKey: .alias)) ?? []
         followed = (try? c.decode(Bool.self, forKey: .followed)) ?? false
     }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encodeIfPresent(picUrl, forKey: .picUrl)
+        try c.encode(albumSize, forKey: .albumSize)
+        try c.encode(musicSize, forKey: .musicSize)
+        try c.encodeIfPresent(briefDesc, forKey: .briefDesc)
+        try c.encode(alias, forKey: .alias)
+        try c.encode(followed, forKey: .followed)
+    }
 }
 
 // MARK: - Toplist
 
-struct ToplistItem: Decodable, Hashable, Identifiable {
+struct ToplistItem: Codable, Hashable, Identifiable {
     let id: Int
     let name: String
     let coverImgUrl: String?
@@ -379,7 +404,7 @@ struct FreeTrialInfo: Codable, Hashable {
 /// A cloud-disk entry. The real payload nests metadata under `privateCloud`
 /// and the playable track under `simpleSong`; older docs show flat fields,
 /// so both shapes are tolerated.
-struct CloudSongItem: Decodable, Hashable, Identifiable {
+struct CloudSongItem: Codable, Hashable, Identifiable {
     let songId: Int
     let songName: String?
     let artist: String?
@@ -410,11 +435,20 @@ struct CloudSongItem: Decodable, Hashable, Identifiable {
         artist = (try? c.decode(String.self, forKey: .artist)) ?? nested?.artist
         fileSize = (try? c.decode(Int.self, forKey: .fileSize)) ?? nested?.fileSize ?? 0
     }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(songId, forKey: .songId)
+        try c.encodeIfPresent(songName, forKey: .songName)
+        try c.encodeIfPresent(artist, forKey: .artist)
+        try c.encode(fileSize, forKey: .fileSize)
+        try c.encodeIfPresent(simpleSong, forKey: .simpleSong)
+    }
 }
 
 // MARK: - Play record
 
-struct PlayRecordItem: Decodable, Hashable {
+struct PlayRecordItem: Codable, Hashable {
     let playCount: Int
     let score: Int
     let song: Track

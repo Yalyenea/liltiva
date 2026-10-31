@@ -1,6 +1,6 @@
 import Foundation
 
-struct TrackComment: Decodable, Identifiable {
+struct TrackComment: Codable, Identifiable {
     let commentId: Int
     let user: UserProfile
     let content: String
@@ -12,13 +12,13 @@ struct TrackComment: Decodable, Identifiable {
 
     var id: Int { commentId }
 
-    struct Reply: Decodable {
+    struct Reply: Codable {
         let user: UserProfile?
         let content: String?
     }
 }
 
-struct TrackCommentsPage: Decodable {
+struct TrackCommentsPage: Codable {
     let comments: [TrackComment]
     // The first page includes popular comments; subsequent pages may omit them.
     let hotComments: [TrackComment]?

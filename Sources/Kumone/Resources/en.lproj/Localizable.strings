@@ -184,6 +184,9 @@
 "暂无播放记录" = "No listening history yet";
 "%lld 次" = "%lld plays";
 "云盘还没有歌曲" = "No songs in your cloud disk";
+"登录后才能查看音乐云盘" = "Sign in to view your cloud disk";
+"云盘数据不完整，请重试" = "Cloud data is incomplete. Please try again.";
+"暂无推荐内容" = "No recommendations yet";
 "在网易云音乐客户端上传的歌曲会出现在这里" = "Songs uploaded from the NetEase Cloud Music client appear here";
 "已使用 %@ GB / %@ GB" = "%@ GB used of %@ GB";
 
