@@ -223,6 +223,72 @@ struct TrackTableTests {
         }
     }
 
+    @Test(arguments: [true, false])
+    func hidingReleasesHostsWithoutLosingListState(windowHidden: Bool) throws {
+        let visibility = MainWindowVisibility()
+        let coordinator = TrackTable.Coordinator(visibility: visibility)
+        coordinator.scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        let content = fixture(count: 1_200)
+        let table = coordinator.table
+        weak var releasedHost: NSHostingView<AnyView>?
+        // AppKit autoreleases views during layout; drain the event's temporary
+        // ownership before checking whether the reuse pool still retains a host.
+        let (cell, offset, row) = try autoreleasepool {
+            coordinator.update(content, environment: EnvironmentValues())
+            table.selectRowIndexes(IndexSet(integer: 1_100), byExtendingSelection: false)
+            table.scrollRowToVisible(1_100)
+            table.layoutSubtreeIfNeeded()
+            let cell = try #require(table.view(atColumn: 0, row: 1_100, makeIfNecessary: true) as? TrackTable.Cell)
+            releasedHost = cell.host
+            let offset = coordinator.scrollView.contentView.bounds.origin
+            let row = table.rect(ofRow: 1_100)
+            if windowHidden {
+                visibility.update(isVisible: false, isOnScreen: false)
+            } else {
+                visibility.setBrowsingVisible(false)
+            }
+            return (cell, offset, row)
+        }
+        let wasReleased = releasedHost == nil
+        #expect(wasReleased)
+        #expect(cell.subviews.isEmpty)
+        // Background model changes and native layout must not recreate hosts.
+        coordinator.update(content, environment: EnvironmentValues())
+        cell.layout()
+        #expect(cell.subviews.isEmpty)
+        #expect(!coordinator.moveSelection(forward: true))
+        #expect(!coordinator.activateSelection())
+        #expect(!coordinator.focusSearch())
+        #expect(table.selectedRow == 1_100)
+        #expect(coordinator.scrollView.contentView.bounds.origin == offset)
+        #expect(table.rect(ofRow: 1_100) == row)
+
+        visibility.update(isVisible: true, isOnScreen: true)
+        if !windowHidden { #expect(cell.subviews.isEmpty) }
+        visibility.setBrowsingVisible(true)
+        coordinator.update(content, environment: EnvironmentValues())
+        table.layoutSubtreeIfNeeded()
+        #expect(!cell.subviews.isEmpty)
+        #expect(table.selectedRow == 1_100)
+        #expect(coordinator.scrollView.contentView.bounds.origin == offset)
+        #expect(table.rect(ofRow: 1_100) == row)
+    }
+
+    @Test func responsiveScrollingKeepsOverdrawNearTheViewport() {
+        let coordinator = TrackTable.Coordinator(visibility: MainWindowVisibility())
+        coordinator.scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        coordinator.update(fixture(count: 1_200), environment: EnvironmentValues())
+        let table = coordinator.table
+        for index in [1, 600, 1_200] {
+            table.scrollRowToVisible(index)
+            table.layoutSubtreeIfNeeded()
+            table.prepareContent(in: table.bounds)
+            #expect(table.preparedContentRect.contains(table.visibleRect))
+            #expect(table.preparedContentRect.height <= table.visibleRect.height * 2)
+            #expect(table.numberOfRows == 1_202)
+        }
+    }
+
     private final class RowLifetime {
         var creations = 0
         var songID = 0

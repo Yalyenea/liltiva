@@ -114,7 +114,8 @@ struct CommentsPanel: View {
             }
             Text(comment.content).font(.system(size: 13)).lineSpacing(3).textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            if let expression = comment.expressionUrl, let url = URL(string: expression) {
+            // The expression is displayed at 128 points, including on Retina.
+            if let url = comment.expressionUrl?.resizedImageURL(256) {
                 CachedAsyncImage(url: url)
                     .aspectRatio(contentMode: .fit).frame(width: 128, height: 128)
                     .clipShape(RoundedRectangle(cornerRadius: 6))

@@ -187,14 +187,19 @@ struct MainWindow: View {
                 // window, so they are its only way to close, dock or zoom it
                 // (#128).
                 nowPlayingChromeTask = Task { @MainActor in
+                    await ImageCache.shared.trimMemory()
                     try? await Task.sleep(for: .milliseconds(120))
                     guard !Task.isCancelled else { return }
                     nowPlayingChromeFadedOut = true
                     try? await Task.sleep(for: .milliseconds(230))
                     guard !Task.isCancelled else { return }
                     nowPlayingChromeHidden = true
+                    // Keep the underlying page for the slide, then release
+                    // its native row hosts and decoded browsing covers together.
+                    windowVisibility.setBrowsingVisible(false)
                 }
             } else {
+                windowVisibility.setBrowsingVisible(true)
                 nowPlayingChromeHidden = false
                 nowPlayingChromeFadedOut = false
             }

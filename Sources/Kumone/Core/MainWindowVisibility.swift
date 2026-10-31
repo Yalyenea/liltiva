@@ -14,11 +14,16 @@ import Foundation
 final class MainWindowVisibility: ObservableObject {
     static let shared = MainWindowVisibility(managesProcessMemory: true)
     private let managesProcessMemory: Bool
+    private let imageRetention: @Sendable (Bool) async -> Void
 
     // Independent instances can model window visibility without changing
     // process-wide caches (including in tests).
-    init(managesProcessMemory: Bool = false) {
+    init(managesProcessMemory: Bool = false,
+         imageRetention: @escaping @Sendable (Bool) async -> Void = {
+             await ImageCache.shared.setMemoryRetentionEnabled($0)
+         }) {
         self.managesProcessMemory = managesProcessMemory
+        self.imageRetention = imageRetention
     }
 
     /// Fully on screen — not miniaturised, not ordered out, not covered. The
@@ -31,6 +36,9 @@ final class MainWindowVisibility: ObservableObject {
     /// window comes back. Merely being covered does not count — switching
     /// apps would then tear the page down and up again for no gain.
     @Published private(set) var isOnScreen = true
+    /// Browsing rows and their cached covers are unnecessary once the
+    /// playback page finishes covering them. Active artwork has its own owner.
+    @Published private(set) var isBrowsingVisible = true
     private var memoryCleanup: Task<Void, Never>?
 
     deinit { memoryCleanup?.cancel() }
@@ -41,22 +49,33 @@ final class MainWindowVisibility: ObservableObject {
         }
         if isOnScreen != self.isOnScreen {
             self.isOnScreen = isOnScreen
-            guard managesProcessMemory else { return }
-            // This lifecycle outlives hidden SwiftUI tasks. Free decoded covers
-            // even when SwiftUI has stopped evaluating the window's contents.
-            memoryCleanup?.cancel()
-            memoryCleanup = Task {
-                guard !Task.isCancelled else { return }
-                await ImageCache.shared.setMemoryRetentionEnabled(isOnScreen)
-                guard !isOnScreen else { return }
-                do { try await Task.sleep(for: .seconds(2)) } catch { return }
-                guard !Task.isCancelled else { return }
-                // Return free allocator pages after the views release images,
-                // once per hide, away from the main and audio threads.
-                await Task.detached(priority: .utility) {
-                    _ = malloc_zone_pressure_relief(nil, 0)
-                }.value
-            }
+            updateMemoryPolicy()
+        }
+    }
+
+    func setBrowsingVisible(_ visible: Bool) {
+        guard visible != isBrowsingVisible else { return }
+        isBrowsingVisible = visible
+        updateMemoryPolicy()
+    }
+
+    private func updateMemoryPolicy() {
+        guard managesProcessMemory else { return }
+        let retainImages = isOnScreen && isBrowsingVisible
+        let imageRetention = imageRetention
+        memoryCleanup?.cancel()
+        memoryCleanup = Task {
+            guard !Task.isCancelled else { return }
+            await imageRetention(retainImages)
+            guard !retainImages else { return }
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            guard !Task.isCancelled else { return }
+            // Rows release their hosts synchronously, while SwiftUI drains
+            // temporary objects later. Reclaim free pages after both finish,
+            // away from the main and audio threads, once per visibility change.
+            await Task.detached(priority: .utility) {
+                _ = malloc_zone_pressure_relief(nil, 0)
+            }.value
         }
     }
 }

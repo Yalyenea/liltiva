@@ -7,7 +7,7 @@
 `---` 分隔，随后是完整的**中文**部分（`### 新增` / `### 修复` / `### 改进`）。英文块与中文块
 的条目一一对应、顺序一致。（0.3.19 起采用此双语分块格式；更早的版本沿用旧的中英交替格式。）
 
-## Unreleased - 2026-10-29
+## Unreleased - 2026-10-31
 
 ### Added
 
@@ -34,6 +34,8 @@
 - **macOS**: streamline settings with compact sections, fewer repeated headings and aligned controls; retain original Chinese quality and effect names while localizing surrounding controls and status text.
 - **macOS**: combine saved playlists, albums and followed artists into one Collections entry with three tabs; migrate and deduplicate pinned entries and shorten Chinese top-bar labels while retaining full-name tooltips.
 - **macOS**: reduce playback CPU work with stable lyric layouts and shorter transitions; stop hidden visual updates, release background artwork, bound metadata concurrency and avoid duplicate metadata requests.
+- **macOS**: release playlist rows and cached covers while hidden or covered by now playing, limit offscreen row rendering, and restore selection and scroll position on return.
+- **macOS**: use display-sized thumbnails in posts and comments and reuse avatars without creating a cropped image on every refresh.
 - **macOS**: bound compressed streaming backlog memory and reuse the existing audio cache for deferred decoding, avoiding duplicate writes during normal playback.
 - **macOS**: swipe horizontally on the now-playing page or playback bar to change tracks, with directional transitions and dedicated volume adjustment over the volume control; support pointer drags and two-finger trackpad gestures.
 - **macOS**: share one compact playback bar across browsing and now-playing pages, with centered transport controls, visible volume and output controls, and one button for ordered, shuffle and repeat-one modes.
@@ -77,6 +79,8 @@
 - **macOS**：设置页采用紧凑分区，删除重复标题并对齐控件；音质和音效保留原本的中文名称，其余控件与状态文案随界面语言切换。
 - **macOS**：收藏歌单、专辑和关注歌手合并为一个收藏入口，页内分为三个分类；迁移并去重顶栏固定项，精简中文顶栏名称并保留完整名称提示。
 - **macOS**：通过稳定歌词布局和缩短过渡降低播放 CPU 开销；停止不可见动画、释放后台封面、限制元数据请求并发并避免重复获取。
+- **macOS**：歌单隐藏或被播放页覆盖时释放列表渲染内容和封面缓存，限制屏幕外预渲染范围，返回时保留选中歌曲和滚动位置。
+- **macOS**：动态和评论图片按显示尺寸加载缩略图，头像刷新时复用原图，减少重复裁剪生成图片。
 - **macOS**：限制流式音频压缩积压的内存占用，并复用已有音频缓存延后解码，减少正常播放时的重复写盘。
 - **macOS**：播放页和播放器底栏支持左右滑动切歌，加入跟手与定向过渡动画；音量区域内滑动调整音量，支持鼠标拖动和触控板双指滑动。
 - **macOS**：浏览页与播放页共用紧凑底栏，播放控制居中，音量和输出设备直接可见；顺序、随机和单曲循环合为一个切换按钮。

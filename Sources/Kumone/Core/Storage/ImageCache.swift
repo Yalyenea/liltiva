@@ -193,8 +193,16 @@ actor ImageCache {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
-    /// Background playback still needs system artwork. Keep its shared loads
-    /// and disk files, but release decoded covers until the main window returns.
+    /// Active views own their pixels; evict unused covers before another
+    /// full-window surface allocates its rendering buffers. Earlier requests
+    /// must not immediately fill the memory cache again.
+    func trimMemory() {
+        memoryGeneration += 1
+        memory.removeAllObjects()
+    }
+
+    /// Keep shared loads and disk files available while browsing is covered
+    /// or the window is hidden, without retaining their decoded images.
     func setMemoryRetentionEnabled(_ enabled: Bool) {
         guard memoryRetentionEnabled != enabled else { return }
         memoryRetentionEnabled = enabled

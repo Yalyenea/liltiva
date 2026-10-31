@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// AppKit owns scrolling and cell reuse. Delegate heights keep the header,
@@ -33,8 +34,14 @@ struct TrackTable: NSViewRepresentable {
         private let footerCell = Cell()
         private var headerHeight: CGFloat = 1
         private var footerHeight: CGFloat = 1
+        private let cells = NSHashTable<Cell>.weakObjects()
+        private var visibilitySubscription: AnyCancellable?
+        private var isContentVisible: Bool
 
-        override init() {
+        override convenience init() { self.init(visibility: .shared) }
+
+        init(visibility: MainWindowVisibility) {
+            isContentVisible = visibility.isOnScreen && visibility.isBrowsingVisible
             super.init()
             let column = NSTableColumn(identifier: .init("tracks"))
             column.resizingMask = .autoresizingMask
@@ -68,6 +75,21 @@ struct TrackTable: NSViewRepresentable {
             scrollView.borderType = .noBorder
             scrollView.automaticallyAdjustsContentInsets = false
             scrollView.onWidthChange = { [weak self] in self?.updateChrome(contentChanged: false) }
+            // Hidden SwiftUI windows may defer view updates. Release their
+            // native hosts directly, including cells in AppKit's reuse pool.
+            visibilitySubscription = visibility.$isOnScreen.combineLatest(visibility.$isBrowsingVisible)
+                .sink { [weak self] onScreen, browsing in
+                    guard let self else { return }
+                    let visible = onScreen && browsing
+                    guard visible != self.isContentVisible else { return }
+                    self.isContentVisible = visible
+                    if self.isContentVisible {
+                        self.updateChrome()
+                        self.refreshVisibleCells()
+                    } else {
+                        self.releaseHostedContent()
+                    }
+                }
         }
 
         func update(_ next: TrackTable, environment: EnvironmentValues) {
@@ -107,8 +129,12 @@ struct TrackTable: NSViewRepresentable {
                     table.deselectAll(nil)
                 }
             }
-            // Permission, search-header and download updates refresh only
-            // existing cells. Playback is observed inside each hosted row.
+            refreshVisibleCells()
+            notifyHeightChanges(changedHeights)
+        }
+
+        private func refreshVisibleCells() {
+            guard isContentVisible else { return }
             let visible = table.rows(in: table.visibleRect)
             if visible.location != NSNotFound {
                 for index in visible.location..<NSMaxRange(visible) {
@@ -117,7 +143,14 @@ struct TrackTable: NSViewRepresentable {
                     }
                 }
             }
-            notifyHeightChanges(changedHeights)
+        }
+
+        private func releaseHostedContent() {
+            // Keep the table, its geometry and the page model alive. Only
+            // render trees are rebuilt when the same rows become visible.
+            headerCell.releaseHostedContent()
+            footerCell.releaseHostedContent()
+            for cell in cells.allObjects { cell.releaseHostedContent() }
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { (content?.trackIDs.count ?? 0) + 2 }
@@ -136,7 +169,7 @@ struct TrackTable: NSViewRepresentable {
 
         @discardableResult
         func moveSelection(forward: Bool) -> Bool {
-            guard let count = content?.trackIDs.count, count > 0 else { return false }
+            guard isContentVisible, let count = content?.trackIDs.count, count > 0 else { return false }
             let index = table.selectedRow < 1 ? (forward ? 1 : count)
                 : min(count, max(1, table.selectedRow + (forward ? 1 : -1)))
             table.window?.makeFirstResponder(table)
@@ -148,7 +181,7 @@ struct TrackTable: NSViewRepresentable {
         @discardableResult
         func activateSelection() -> Bool {
             let index = table.selectedRow
-            guard index > 0, index <= (content?.trackIDs.count ?? 0),
+            guard isContentVisible, index > 0, index <= (content?.trackIDs.count ?? 0),
                   let cell = table.view(atColumn: 0, row: index, makeIfNecessary: true) as? Cell else { return false }
             cell.host.layoutSubtreeIfNeeded()
             guard let activate = cell.host.descendant(of: TrackActivationTarget.Target.self)?.activate else { return false }
@@ -158,7 +191,8 @@ struct TrackTable: NSViewRepresentable {
 
         @discardableResult
         func focusSearch() -> Bool {
-            guard let field = headerCell.host.descendant(of: ShortcutSearchField.Field.self,
+            guard isContentVisible,
+                  let field = headerCell.host.descendant(of: ShortcutSearchField.Field.self,
                                                        matching: { $0.isPlaylistSearch }) else { return false }
             table.scrollRowToVisible(0)
             table.layoutSubtreeIfNeeded()
@@ -172,12 +206,13 @@ struct TrackTable: NSViewRepresentable {
             let identifier = NSUserInterfaceItemIdentifier("track")
             let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? Cell ?? Cell()
             cell.identifier = identifier
+            cells.add(cell)
             configure(cell, at: row)
             return cell
         }
 
         private func configure(_ cell: Cell, at index: Int) {
-            guard let content else { return }
+            guard isContentVisible, let content else { return }
             guard index > 0, index <= content.trackIDs.count else { return }
             let trackIndex = index - 1
             // A reused host must retain its view graph. Keying the entire root
@@ -191,7 +226,7 @@ struct TrackTable: NSViewRepresentable {
         /// cell reuse; scrolling and playback never measure the whole song list.
         @discardableResult
         private func updateChrome(contentChanged: Bool = true, notifyTable: Bool = true) -> IndexSet {
-            guard let content else { return [] }
+            guard isContentVisible, let content else { return [] }
             let width = scrollView.contentSize.width
             let nextHeader = contentChanged || content.headerHeight == nil
                 ? measure(content.header, in: headerCell, width: width, fixedHeight: content.headerHeight)
@@ -246,6 +281,14 @@ struct TrackTable: NSViewRepresentable {
         var activateSelection: (() -> Bool)?
         var focusSearch: (() -> Bool)?
 
+        override func prepareContent(in rect: NSRect) {
+            // Each row owns a SwiftUI graph. Bound AppKit's growing idle
+            // overdraw while retaining half a viewport of scrolling headroom.
+            let visible = visibleRect
+            let nearby = visible.insetBy(dx: 0, dy: -visible.height / 2)
+            super.prepareContent(in: rect.intersection(nearby).union(visible))
+        }
+
         override func validateProposedFirstResponder(_ responder: NSResponder, for event: NSEvent?) -> Bool {
             // AppKit normally requires an editable control's row to be selected,
             // but the playlist search lives in our nonselectable header row.
@@ -288,16 +331,26 @@ struct TrackTable: NSViewRepresentable {
 
     @MainActor
     final class Cell: NSTableCellView {
-        let host = NSHostingView(rootView: AnyView(EmptyView()))
+        private var hostedView: NSHostingView<AnyView>?
 
-        override init(frame frameRect: NSRect) {
-            super.init(frame: frameRect)
+        var host: NSHostingView<AnyView> {
+            if let hostedView { return hostedView }
+            let host = NSHostingView(rootView: AnyView(EmptyView()))
             host.sizingOptions = []
             host.autoresizingMask = [.width, .height]
+            host.frame = bounds
             addSubview(host)
+            hostedView = host
+            return host
         }
 
+        override init(frame frameRect: NSRect) { super.init(frame: frameRect) }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        func releaseHostedContent() {
+            hostedView?.removeFromSuperview()
+            hostedView = nil
+        }
 
         func update(_ view: AnyView, environment: EnvironmentValues) {
             host.rootView = AnyView(view
@@ -308,7 +361,7 @@ struct TrackTable: NSViewRepresentable {
 
         override func layout() {
             super.layout()
-            if host.frame != bounds { host.frame = bounds }
+            if let hostedView, hostedView.frame != bounds { hostedView.frame = bounds }
         }
     }
 }

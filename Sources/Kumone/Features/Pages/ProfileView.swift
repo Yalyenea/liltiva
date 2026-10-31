@@ -361,7 +361,9 @@ private struct SocialEventRow: View {
             if let pictures = event.pics, !pictures.isEmpty {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 180), spacing: 8)], alignment: .leading, spacing: 8) {
                     ForEach(Array(pictures.prefix(9).enumerated()), id: \.offset) { _, picture in
-                        CachedAsyncImage(url: (picture.squareUrl ?? picture.originUrl).flatMap(URL.init(string:)))
+                        // The grid is at most 180 points wide; a Retina-sized
+                        // thumbnail avoids decoding a 1024-pixel original.
+                        CachedAsyncImage(url: (picture.squareUrl ?? picture.originUrl)?.resizedImageURL(384))
                             .frame(height: 130).clipped().clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                 }

@@ -434,9 +434,13 @@ struct AccountAvatarButton: View {
     @ViewBuilder
     private func avatar(diameter: CGFloat) -> some View {
         if let avatarImage {
-            Image(platformImage: avatarImage.circularCropped(diameter: diameter))
+            // Clip the existing pixels without allocating another image on
+            // each account view update.
+            Image(platformImage: avatarImage)
                 .resizable()
+                .aspectRatio(contentMode: .fill)
                 .frame(width: diameter, height: diameter)
+                .clipShape(Circle())
         } else {
             Image(systemName: "person.crop.circle.fill")
                 .font(.system(size: diameter - 2))
