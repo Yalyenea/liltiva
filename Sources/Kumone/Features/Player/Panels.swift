@@ -272,7 +272,9 @@ private struct QueueRow: View {
 
             ZStack {
                 if isCurrent {
-                    PlayingIndicator(animating: player.isPlaying)
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.accent)
                 } else if isHovering {
                     Button {
                         if let upcomingIndex { player.removeUpcoming(at: upcomingIndex, matching: track.id) }

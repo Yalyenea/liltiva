@@ -75,6 +75,7 @@ struct MainWindow: View {
 
     var body: some View {
         detailStack
+            .environment(\.cachedImageScope, .browsing)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onGeometryChange(for: MainColumnGeometry.Layout.self) { proxy in
                 MainColumnGeometry.Layout(frame: proxy.frame(in: .named("mainWindow")))

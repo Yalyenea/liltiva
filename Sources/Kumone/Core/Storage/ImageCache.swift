@@ -2,6 +2,7 @@ import Combine
 import CryptoKit
 import Foundation
 import ImageIO
+import QuartzCore
 import SwiftUI
 
 /// Two-tier (memory + disk) image cache with in-flight request coalescing.
@@ -250,6 +251,23 @@ struct CachedImageState {
     }
 }
 
+/// Browsing covers can be released once the playback page finishes covering them.
+enum CachedImageScope {
+    case window
+    case browsing
+}
+
+private struct CachedImageScopeKey: EnvironmentKey {
+    static let defaultValue = CachedImageScope.window
+}
+
+extension EnvironmentValues {
+    var cachedImageScope: CachedImageScope {
+        get { self[CachedImageScopeKey.self] }
+        set { self[CachedImageScopeKey.self] = newValue }
+    }
+}
+
 /// Own decoded pixels outside SwiftUI's hidden-window update cycle.
 @MainActor
 final class CachedImageStorage: ObservableObject {
@@ -258,13 +276,15 @@ final class CachedImageStorage: ObservableObject {
     private(set) var generation: UInt64 = 0
     private var visibilitySubscription: AnyCancellable?
 
-    init(url: URL?, visibility: MainWindowVisibility? = nil) {
+    init(url: URL?, scope: CachedImageScope = .window, visibility: MainWindowVisibility? = nil) {
         let visibility = visibility ?? .shared
-        let onScreen = visibility.isOnScreen
+        let onScreen = visibility.isOnScreen && (scope == .window || visibility.isBrowsingVisible)
         isOnScreen = onScreen
         let image = onScreen ? url.flatMap { ImageCache.shared.cachedImage(for: $0) } : nil
         state = CachedImageState(url: url, image: image)
         visibilitySubscription = visibility.$isOnScreen
+            .combineLatest(visibility.$isBrowsingVisible)
+            .map { onScreen, browsing in onScreen && (scope == .window || browsing) }
             .removeDuplicates()
             .sink { [weak self] isOnScreen in
                 guard let self, self.isOnScreen != isOnScreen else { return }
@@ -293,6 +313,26 @@ struct CachedAsyncImage<Placeholder: View>: View {
     let url: URL?
     var animated: Bool = true
     @ViewBuilder var placeholder: () -> Placeholder
+    @Environment(\.cachedImageScope) private var scope
+
+    init(url: URL?, animated: Bool = true,
+         @ViewBuilder placeholder: @escaping () -> Placeholder) {
+        self.url = url
+        self.animated = animated
+        self.placeholder = placeholder
+    }
+
+    var body: some View {
+        CachedImageContent(url: url, animated: animated, scope: scope, placeholder: placeholder)
+    }
+}
+
+/// Resolve the page's scope before constructing its persistent pixel owner.
+/// Playback controls and panels keep the window scope even above a covered page.
+private struct CachedImageContent<Placeholder: View>: View {
+    let url: URL?
+    let animated: Bool
+    @ViewBuilder var placeholder: () -> Placeholder
 
     @StateObject private var imageStorage: CachedImageStorage
 
@@ -302,28 +342,20 @@ struct CachedAsyncImage<Placeholder: View>: View {
         let generation: UInt64
     }
 
-    init(url: URL?, animated: Bool = true,
+    init(url: URL?, animated: Bool, scope: CachedImageScope,
          @ViewBuilder placeholder: @escaping () -> Placeholder) {
         self.url = url
         self.animated = animated
         self.placeholder = placeholder
         // Seed inside the object so StateObject's initial closure captures no
         // image that could outlive the storage's explicit release on hide.
-        _imageStorage = StateObject(wrappedValue: CachedImageStorage(url: url))
+        _imageStorage = StateObject(wrappedValue: CachedImageStorage(url: url, scope: scope))
     }
 
     var body: some View {
         ZStack {
             placeholder()
-            // A reused row keeps its State. Resolve an already decoded cover
-            // synchronously when the URL changes, before the new task runs.
-            if imageStorage.isOnScreen,
-               let image = imageStorage.state.image(for: url) ?? url.flatMap({ ImageCache.shared.cachedImage(for: $0) }) {
-                Image(platformImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .transition(animated ? .opacity.animation(.easeIn(duration: 0.22)) : .identity)
-            }
+            CachedImagePixels(storage: imageStorage, url: url, animated: animated)
         }
         .task(id: RequestID(url: url, isOnScreen: imageStorage.isOnScreen, generation: imageStorage.generation)) {
             guard imageStorage.isOnScreen, let url else {
@@ -346,6 +378,116 @@ struct CachedAsyncImage<Placeholder: View>: View {
                   imageStorage.generation == generation, let cached else { return }
             imageStorage.finish(cached, for: url)
         }
+    }
+}
+
+/// SwiftUI may retain an old Image display list while its window is hidden.
+/// Keep pixel ownership in a native layer that clears on visibility directly.
+private struct CachedImagePixels: NSViewRepresentable {
+    let storage: CachedImageStorage
+    let url: URL?
+    let animated: Bool
+
+    func makeNSView(context: Context) -> CachedImageLayerView {
+        let view = CachedImageLayerView()
+        view.update(storage: storage, url: url, animated: animated)
+        return view
+    }
+
+    func updateNSView(_ view: CachedImageLayerView, context: Context) {
+        view.update(storage: storage, url: url, animated: animated)
+    }
+
+    static func dismantleNSView(_ view: CachedImageLayerView, coordinator: ()) {
+        view.releaseContent()
+    }
+}
+
+final class CachedImageLayerView: NSView {
+    private weak var storage: CachedImageStorage?
+    private weak var displayedImage: PlatformImage?
+    private var subscription: AnyCancellable?
+    private var url: URL?
+    private var animated = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        layerContentsPlacement = .scaleProportionallyToFill
+        layer?.masksToBounds = true
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    // Images decorate buttons and rows; their host must not intercept input.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func update(storage: CachedImageStorage, url: URL?, animated: Bool) {
+        if self.url != url { clearPixels() }
+        self.url = url
+        self.animated = animated
+        if self.storage !== storage {
+            self.storage = storage
+            subscription = storage.$state.combineLatest(storage.$isOnScreen)
+                .sink { [weak self] state, onScreen in
+                    // Published values arrive before storage's properties change.
+                    self?.render(state: state, onScreen: onScreen)
+                }
+        }
+        render(state: storage.state, onScreen: storage.isOnScreen)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let storage, window != nil {
+            render(state: storage.state, onScreen: storage.isOnScreen)
+        } else {
+            clearPixels()
+        }
+    }
+
+    private func render(state: CachedImageState, onScreen: Bool) {
+        guard onScreen, window != nil, let url,
+              let image = state.image(for: url) ?? ImageCache.shared.cachedImage(for: url) else {
+            clearPixels()
+            return
+        }
+        guard displayedImage !== image, let layer else { return }
+        let isReveal = layer.contents == nil
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.contents = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        layer.contentsGravity = .resizeAspectFill
+        CATransaction.commit()
+        displayedImage = image
+        // Cached images appear immediately. Only an asynchronous first reveal
+        // fades in; upgrading a preview preserves the already visible cover.
+        if isReveal, animated, ImageCache.shared.cachedImage(for: url) == nil,
+           !Platform.isReduceMotionEnabled {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0
+            fade.toValue = 1
+            fade.duration = 0.22
+            fade.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            layer.add(fade, forKey: "reveal")
+        }
+    }
+
+    private func clearPixels() {
+        displayedImage = nil
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.removeAllAnimations()
+        layer?.contents = nil
+        CATransaction.commit()
+    }
+
+    func releaseContent() {
+        subscription = nil
+        storage = nil
+        clearPixels()
     }
 }
 

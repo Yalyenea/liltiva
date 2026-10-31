@@ -213,6 +213,96 @@ struct ImageCacheClearTests {
         #expect(!storage.isOnScreen)
     }
 
+    @Test @MainActor func playbackCoverReleasesBrowsingPixelsButKeepsTransportArtwork() {
+        let visibility = MainWindowVisibility()
+        let url = URL(string: "https://example.test/covered-page.png")!
+        let browsing = CachedImageStorage(url: url, scope: .browsing, visibility: visibility)
+        let transport = CachedImageStorage(url: url, visibility: visibility)
+        var image: PlatformImage? = PlatformImage(size: NSSize(width: 2, height: 2))
+        weak var browsingPixels = image
+        browsing.reset(for: url, image: image)
+        image = nil
+        let transportImage = PlatformImage(size: NSSize(width: 2, height: 2))
+        transport.reset(for: url, image: transportImage)
+        let generation = browsing.generation
+
+        visibility.setBrowsingVisible(false)
+        #expect(browsingPixels == nil)
+        #expect(!browsing.isOnScreen)
+        #expect(browsing.generation != generation)
+        #expect(transport.state.image(for: url) === transportImage)
+        // A request that finishes underneath the playback page cannot refill it.
+        browsing.reset(for: url, image: transportImage)
+        browsing.finish(transportImage, for: url)
+        #expect(browsing.state.image(for: url) == nil)
+
+        visibility.update(isVisible: false, isOnScreen: false)
+        visibility.setBrowsingVisible(true)
+        #expect(!browsing.isOnScreen)
+        #expect(transport.state.image(for: url) == nil)
+        visibility.update(isVisible: true, isOnScreen: true)
+        #expect(browsing.isOnScreen)
+        browsing.reset(for: url)
+        browsing.finish(transportImage, for: url)
+        #expect(browsing.state.image(for: url) === transportImage)
+    }
+
+    @Test @MainActor func browsingImagesCreatedUnderPlaybackWaitUntilUncovered() {
+        let visibility = MainWindowVisibility()
+        visibility.setBrowsingVisible(false)
+        let storage = CachedImageStorage(url: nil, scope: .browsing, visibility: visibility)
+        #expect(!storage.isOnScreen)
+        visibility.update(isVisible: false, isOnScreen: true)
+        #expect(!storage.isOnScreen)
+        visibility.setBrowsingVisible(true)
+        #expect(storage.isOnScreen)
+    }
+
+    @Test @MainActor func nativeImageLayerReleasesPixelsWithoutASwiftUIRender() throws {
+        _ = NSApplication.shared
+        let visibility = MainWindowVisibility()
+        let url = URL(string: "https://example.test/native-cover.png")!
+        let storage = CachedImageStorage(url: url, scope: .browsing, visibility: visibility)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let view = CachedImageLayerView(frame: window.contentView!.bounds)
+        window.contentView?.addSubview(view)
+        view.update(storage: storage, url: url, animated: false)
+        let image = try #require(NSImage(data: png))
+        storage.reset(for: url, image: image)
+        #expect(view.layer?.contents != nil)
+        #expect(view.hitTest(.zero) == nil)
+
+        visibility.setBrowsingVisible(false)
+        #expect(view.layer?.contents == nil)
+        #expect(view.layer?.animationKeys()?.isEmpty != false)
+        visibility.setBrowsingVisible(true)
+        storage.reset(for: url, image: image)
+        #expect(view.layer?.contents != nil)
+
+        // Reused rows may change URL before the replacement image is loaded.
+        let nextURL = URL(string: "https://example.test/next-native-cover.png")!
+        view.update(storage: storage, url: nextURL, animated: false)
+        #expect(view.layer?.contents == nil)
+        storage.reset(for: nextURL, image: image)
+        #expect(view.layer?.contents != nil)
+        view.removeFromSuperview()
+        #expect(view.layer?.contents == nil)
+        storage.finish(image, for: nextURL)
+        #expect(view.layer?.contents == nil)
+        window.contentView?.addSubview(view)
+        #expect(view.layer?.contents != nil)
+
+        visibility.update(isVisible: false, isOnScreen: false)
+        #expect(view.layer?.contents == nil)
+        view.releaseContent()
+        visibility.update(isVisible: true, isOnScreen: true)
+        storage.reset(for: nextURL, image: image)
+        #expect(view.layer?.contents == nil)
+    }
+
     @Test @MainActor func returningRequiresFreshPixelsEvenWhenSwiftUIMissesTheHiddenInterval() {
         let visibility = MainWindowVisibility()
         let url = URL(string: "https://example.test/view-cover.png")!

@@ -31,6 +31,8 @@
 
 ### Improved
 
+- **macOS**: release covered and hidden artwork directly, reduce redundant system playback updates, and replace animated spectrum bars with a static current-track icon; remove spectrum analysis from playback.
+
 - **macOS**: streamline settings with compact sections, fewer repeated headings and aligned controls; retain original Chinese quality and effect names while localizing surrounding controls and status text.
 - **macOS**: combine saved playlists, albums and followed artists into one Collections entry with three tabs; migrate and deduplicate pinned entries and shorten Chinese top-bar labels while retaining full-name tooltips.
 - **macOS**: reduce playback CPU work with stable lyric layouts and shorter transitions; stop hidden visual updates, release background artwork, bound metadata concurrency and avoid duplicate metadata requests.
@@ -75,6 +77,8 @@
 - **macOS**：随机播放歌单时随机选择首曲，明确点选歌曲时从该曲开始；个人页切换歌单与动态时正确更新内容。
 
 ### 改进
+
+- **macOS**：直接释放被遮盖页面和隐藏窗口的封面资源，减少重复的系统播放信息更新；将动态频谱条替换为静态当前歌曲图标，并移除播放中的频谱分析。
 
 - **macOS**：设置页采用紧凑分区，删除重复标题并对齐控件；音质和音效保留原本的中文名称，其余控件与状态文案随界面语言切换。
 - **macOS**：收藏歌单、专辑和关注歌手合并为一个收藏入口，页内分为三个分类；迁移并去重顶栏固定项，精简中文顶栏名称并保留完整名称提示。

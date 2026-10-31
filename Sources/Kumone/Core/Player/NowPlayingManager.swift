@@ -2,6 +2,23 @@ import Combine
 import Foundation
 import MediaPlayer
 
+/// The system advances its own clock between publications. Keep a slow
+/// correction cadence, but publish transport changes and clock drift at once.
+struct NowPlayingProgressPublication {
+    private var previous: (elapsed: TimeInterval, rate: Double, time: TimeInterval)?
+
+    mutating func shouldPublish(elapsed: TimeInterval, rate: Double,
+                               at time: TimeInterval, periodic: Bool = false) -> Bool {
+        if periodic, let previous, previous.rate == rate {
+            let interval = time - previous.time
+            let expected = previous.elapsed + interval * previous.rate
+            if interval < 10, abs(elapsed - expected) < 0.5 { return false }
+        }
+        previous = (elapsed, rate, time)
+        return true
+    }
+}
+
 /// System Now Playing integration: media keys, Control Center, lock-screen metadata.
 @MainActor
 final class NowPlayingManager {
@@ -11,6 +28,7 @@ final class NowPlayingManager {
     private var artworkTask: Task<Void, Never>?
     private var playbackStateCancellables: Set<AnyCancellable> = []
     private var info: [String: Any] = [:]
+    private var progressPublication = NowPlayingProgressPublication()
 
     private init() {}
 
@@ -122,14 +140,11 @@ final class NowPlayingManager {
             MPMediaItemPropertyArtist: track.artistNames,
             MPMediaItemPropertyAlbumTitle: track.album.name,
             MPMediaItemPropertyPlaybackDuration: duration,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: 0.0,
-            MPNowPlayingInfoPropertyPlaybackRate: 1.0,
             // Declare the session as audio so system surfaces treat it as a
             // complete now-playing app (best-effort hardening for #36/#40).
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        MPNowPlayingInfoCenter.default().playbackState = .playing
+        publishCurrentPlayback()
         refreshLikeState()
 
         artworkTask?.cancel()
@@ -141,7 +156,9 @@ final class NowPlayingManager {
                 guard let self, !Task.isCancelled else { return }
                 let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
                 self.info[MPMediaItemPropertyArtwork] = artwork
-                MPNowPlayingInfoCenter.default().nowPlayingInfo = self.info
+                // Artwork can arrive between clock corrections. Publish the
+                // live position with it so old metadata never rewinds the clock.
+                self.publishCurrentPlayback()
             }
             if let image = await ImageCache.shared.image(for: url, onCachedImage: apply) {
                 apply(image)
@@ -149,7 +166,14 @@ final class NowPlayingManager {
         }
     }
 
-    func updateElapsed(_ elapsed: TimeInterval, rate: Double) {
+    private func publishCurrentPlayback() {
+        updateElapsed(player?.livePlaybackTime ?? 0, rate: player?.isPlaying == true ? 1 : 0)
+    }
+
+    func updateElapsed(_ elapsed: TimeInterval, rate: Double, periodic: Bool = false) {
+        guard progressPublication.shouldPublish(elapsed: elapsed, rate: rate,
+                                                at: ProcessInfo.processInfo.systemUptime,
+                                                periodic: periodic) else { return }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
         info[MPNowPlayingInfoPropertyPlaybackRate] = rate
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
@@ -159,6 +183,7 @@ final class NowPlayingManager {
     func clear() {
         artworkTask?.cancel()
         artworkTask = nil
+        progressPublication = NowPlayingProgressPublication()
         info = [:]
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped

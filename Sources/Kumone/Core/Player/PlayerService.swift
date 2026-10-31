@@ -291,10 +291,6 @@ final class PlayerService: ObservableObject {
         repeatMode = UserDefaults.standard.string(forKey: "player.repeat")
             .flatMap(RepeatMode.init) ?? .off
 
-        // Feed the spectrum from actual output, without UI work on the audio thread.
-        engine.setOutputSampleSink { buffer in
-            AudioSpectrum.shared.ingest(buffer)
-        }
 
         // macOS output routing (incl. AirPlay endpoints the system publishes):
         // the controller owns the device list and the user's choice, and this
@@ -326,8 +322,10 @@ final class PlayerService: ObservableObject {
                 // pixel. Half a second is still smoother than the eye needs.
                 if abs(seconds - self.progress) > 0.45 {
                     self.progress = seconds
-                    NowPlayingManager.shared.updateElapsed(seconds, rate: 1)
                 }
+                // The system advances its own clock; the manager only publishes
+                // a correction when needed, including when a stream stalls.
+                NowPlayingManager.shared.updateElapsed(seconds, rate: 1, periodic: true)
                 if self.lastPlaybackCheckpoint.duration(to: .now) >= .seconds(20) {
                     self.persistState()
                 }
@@ -642,7 +640,6 @@ final class PlayerService: ObservableObject {
         engine.pause()
         enginePaused = true
         isPlaying = false
-        AudioSpectrum.shared.reset()
         NowPlayingManager.shared.updateElapsed(progress, rate: 0)
         persistState()
     }
@@ -912,7 +909,6 @@ final class PlayerService: ObservableObject {
             progress = duration
             updateLyricsCursor(at: duration)
             isPlaying = false
-            AudioSpectrum.shared.reset()
             NowPlayingManager.shared.updateElapsed(progress, rate: 0)
             return
         }
@@ -981,11 +977,6 @@ final class PlayerService: ObservableObject {
         servedQuality = nil
         if !continuingCurrentTrack { isTrial = false }
         isPlaying = autoplay
-        // Before the URL is even resolved: holds the bars still rather than
-        // letting them fall back to the decorative animation for the moment it
-        // takes to find out whether this source can be tapped.
-        if autoplay { AudioSpectrum.shared.beginPreparing() }
-        else { AudioSpectrum.shared.reset() }
         resolveGeneration += 1
         let generation = resolveGeneration
 
@@ -1185,7 +1176,6 @@ final class PlayerService: ObservableObject {
                 currentLocalURL = local
                 if isPlaying {
                     engine.play(from: 0)
-                    AudioSpectrum.shared.markTapped()
                     scrobbleStartIfNeeded(track)
                 } else {
                     enginePaused = false
@@ -1216,7 +1206,6 @@ final class PlayerService: ObservableObject {
                               writingTo: partURL)
         if isPlaying {
             engine.play(from: 0)
-            AudioSpectrum.shared.markTapped()
             scrobbleStartIfNeeded(track)
         } else {
             enginePaused = false
@@ -1251,7 +1240,6 @@ final class PlayerService: ObservableObject {
         } else {
             enginePaused = false
         }
-        AudioSpectrum.shared.reset()
         NowPlayingManager.shared.updateMetadata(for: track, duration: sourceDuration)
         refreshSoundEffect()
         schedulePrefetch()
@@ -1476,7 +1464,6 @@ final class PlayerService: ObservableObject {
         duration = fileDuration
         if isPlaying {
             engine.play(from: min(position, max(0, fileDuration - 1)))
-            AudioSpectrum.shared.markTapped()
             scrobbleStartIfNeeded(track)
         } else {
             enginePaused = false

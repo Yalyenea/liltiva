@@ -214,7 +214,9 @@ struct TrackRow: View {
     private var leadingIndicator: some View {
         ZStack {
             if isCurrent {
-                PlayingIndicator(animating: player.isPlaying && !player.showNowPlaying)
+                Image(systemName: "speaker.wave.2.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.accent)
             } else if isHovering, isPlayable {
                 Button(action: onPlay) {
                     Image(systemName: "play.fill")
@@ -320,155 +322,6 @@ struct TrackRow: View {
             Platform.copyToPasteboard(string: "https://music.163.com/#/song?id=\(track.id)")
             ToastCenter.shared.show(String(localized: "链接已复制"))
         }
-    }
-}
-
-// MARK: - Playing indicator
-
-/// The four bars beside the row that's playing.
-///
-/// Deliberately not a SwiftUI animation. Driving these from `TimelineView` —
-/// as this did for a long time — makes SwiftUI re-evaluate and re-lay-out the
-/// enclosing tree on every tick, and with the now-playing page presented as an
-/// overlay that tree is the entire window. Profiling put the cost at roughly
-/// 30% of a core, for four 14pt bars.
-///
-/// Scaling plain `CALayer`s instead is a compositing change: no `draw`, no
-/// layout invalidation, nothing above it in the tree ever learns a frame
-/// happened.
-struct PlayingIndicator: View {
-    var animating: Bool
-    @ObservedObject private var windowVisibility = MainWindowVisibility.shared
-
-    var body: some View {
-        SpectrumBars(animating: animating && windowVisibility.isVisible)
-            .frame(width: SpectrumBarsView.width, height: SpectrumBarsView.maxHeight)
-    }
-}
-
-private struct SpectrumBars: NSViewRepresentable {
-    var animating: Bool
-    func makeNSView(context: Context) -> SpectrumBarsView { SpectrumBarsView() }
-    func updateNSView(_ view: SpectrumBarsView, context: Context) {
-        view.animating = animating
-    }
-    static func dismantleNSView(_ view: SpectrumBarsView, coordinator: ()) {
-        view.animating = false
-    }
-}
-
-final class SpectrumBarsView: PlatformView {
-    static let minHeight: CGFloat = 3
-    static let maxHeight: CGFloat = 14
-    static let barWidth: CGFloat = 2.5
-    static let spacing: CGFloat = 2
-    static let width =
-        CGFloat(AudioSpectrum.bandCount) * barWidth
-        + CGFloat(AudioSpectrum.bandCount - 1) * spacing
-
-    private var bars: [CALayer] = []
-    private var timer: Timer?
-
-    var animating = false {
-        didSet {
-            guard animating != oldValue else { return }
-            animating ? start() : stop()
-        }
-    }
-
-    init() {
-        super.init(frame: CGRect(x: 0, y: 0, width: Self.width, height: Self.maxHeight))
-        wantsLayer = true
-        buildBars()
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-
-    deinit { timer?.invalidate() }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        // Native table reuse can detach a cell before SwiftUI updates its state.
-        // A detached indicator has no visible frames to deliver.
-        if window == nil { stop() }
-        else if animating { start() }
-    }
-
-    private var hostLayer: CALayer? { layer }
-
-    private func buildBars() {
-        guard let host = hostLayer else { return }
-        let color = PlatformColor(Theme.accent).cgColor
-        for _ in 0..<AudioSpectrum.bandCount {
-            let bar = CALayer()
-            bar.backgroundColor = color
-            bar.cornerRadius = 1
-            // Centered anchor so a scale grows the bar symmetrically.
-            bar.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            bar.bounds = CGRect(x: 0, y: 0, width: Self.barWidth, height: Self.maxHeight)
-            host.addSublayer(bar)
-            bars.append(bar)
-        }
-        apply(scaleForAll: Self.minHeight / Self.maxHeight)
-    }
-
-    override func layout() {
-        super.layout()
-        positionBars()
-    }
-
-    private func positionBars() {
-        for (i, bar) in bars.enumerated() {
-            bar.position = CGPoint(
-                x: CGFloat(i) * (Self.barWidth + Self.spacing) + Self.barWidth / 2,
-                y: bounds.midY)
-        }
-    }
-
-    private func start() {
-        guard window != nil, timer == nil else { return }
-        // Common mode so the bars keep moving while a list is being scrolled.
-        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-    }
-
-    private func stop() {
-        timer?.invalidate()
-        timer = nil
-        apply(scaleForAll: Self.minHeight / Self.maxHeight)
-    }
-
-    @MainActor
-    private func tick() {
-        let spectrum = AudioSpectrum.shared
-        guard spectrum.tapState == .tapped, spectrum.isLive else {
-            apply(scaleForAll: Self.minHeight / Self.maxHeight)
-            return
-        }
-
-        let span = Self.maxHeight - Self.minHeight
-
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        for (i, bar) in bars.enumerated() {
-            let level = CGFloat(spectrum.level(at: i))
-            let height = Self.minHeight + span * level
-            bar.transform = CATransform3DMakeScale(1, height / Self.maxHeight, 1)
-        }
-        CATransaction.commit()
-    }
-
-    private func apply(scaleForAll scale: CGFloat) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        for bar in bars {
-            bar.transform = CATransform3DMakeScale(1, scale, 1)
-        }
-        CATransaction.commit()
     }
 }
 
