@@ -19,6 +19,14 @@ private func waitForPrefetch(_ predicate: () async throws -> Bool) async throws 
 
 @Suite("Queue order and offline selection", .timeLimit(.minutes(1)))
 struct PlaybackQueuePlanTests {
+    @Test func listRepeatWrapsFromLastTrackToFirst() throws {
+        let queue = try [queueTrack(1), queueTrack(2), queueTrack(3)]
+        let plan = PlaybackQueuePlan.next(queue: queue, currentIndex: 2, inserted: [], fm: [],
+                                         isFM: false, repeatAll: PlaybackMode.ordered.repeatMode == .all)
+        #expect(plan.map(\.track.id) == [1, 2, 3])
+        #expect(plan.first?.origin == .queue(0))
+    }
+
     @Test func usesSavedShuffleOrderInsertionsAndOneLoopOnly() throws {
         let queue = try [queueTrack(3), queueTrack(1), queueTrack(2)]
         let inserted = try [queueTrack(8), queueTrack(9)]

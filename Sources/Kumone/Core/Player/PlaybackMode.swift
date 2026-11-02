@@ -21,8 +21,7 @@ enum PlaybackMode: String, CaseIterable {
 
     var repeatMode: RepeatMode {
         switch self {
-        case .ordered: return .off
-        case .shuffled: return .all
+        case .ordered, .shuffled: return .all
         case .repeatOne: return .one
         }
     }

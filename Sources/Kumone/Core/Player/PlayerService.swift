@@ -156,7 +156,7 @@ final class PlayerService: ObservableObject {
         get { clock.progress }
         set { clock.progress = newValue }
     }
-    @Published var repeatMode: RepeatMode = .off {
+    @Published var repeatMode: RepeatMode = .all {
         didSet { UserDefaults.standard.set(repeatMode.rawValue, forKey: "player.repeat") }
     }
 
@@ -289,7 +289,7 @@ final class PlayerService: ObservableObject {
         volume = UserDefaults.standard.object(forKey: "player.volume") as? Float ?? 0.8
         engine.outputVolume = volume
         repeatMode = UserDefaults.standard.string(forKey: "player.repeat")
-            .flatMap(RepeatMode.init) ?? .off
+            .flatMap(RepeatMode.init) ?? .all
 
 
         // macOS output routing (incl. AirPlay endpoints the system publishes):
@@ -353,8 +353,8 @@ final class PlayerService: ObservableObject {
             if cameOnline, self.soundEffectState == .offlineMissing { self.refreshSoundEffect(retry: true) }
         }
         restoreState()
-        // A saved list-repeat selection becomes ordinary ordered playback.
-        // Shuffle retains queue wrapping as part of its single mode.
+        // Restore older non-repeating sessions with the current mode's looping
+        // policy so playback and the transport's label always agree.
         repeatMode = playbackMode.repeatMode
         let account = AccountStore.shared
         soundEffectObservation = account.$membership
@@ -377,6 +377,8 @@ final class PlayerService: ObservableObject {
         guard !tracks.isEmpty else { return }
         if let context { recordRecent(context) }
         isFMMode = false
+        // FM disables repetition; a regular queue must restore its visible mode.
+        repeatMode = playbackMode.repeatMode
         queue = tracks
         self.source = source
         playNextList.removeAll()

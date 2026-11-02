@@ -23,13 +23,14 @@ import Testing
         #expect(restored == .repeatOne)
         let next = restored.next()
         #expect(next.queueOrder == .listed)
-        #expect(next.repeatMode == .off)
+        #expect(next.repeatMode == .all)
         #expect(PlaybackMode.shuffled.repeatMode == .all)
     }
 
-    @Test func removedListRepeatRestoresAsOrderedPlayback() {
-        let restored = PlaybackMode(queueOrder: .listed, repeatMode: .all)
+    @Test(arguments: [RepeatMode.off, .all])
+    func listedSessionsRestoreWithListRepeat(_ repeatMode: RepeatMode) {
+        let restored = PlaybackMode(queueOrder: .listed, repeatMode: repeatMode)
         #expect(restored == .ordered)
-        #expect(restored.repeatMode == .off)
+        #expect(restored.repeatMode == .all)
     }
 }
