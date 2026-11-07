@@ -698,3 +698,41 @@
 "发送" = "Send";
 "评论已提交" = "Comment submitted";
 "登录后发表评论" = "Sign in to comment";
+
+/* Sound effect panel */
+"启用音效" = "Enable effects";
+"开启后使用：" = "When enabled: ";
+"选择下方可用音效以开启" = "Choose an available effect below to enable it";
+"采用官方音效数据，由 Liltiva 本地处理，听感可能与官方客户端有差异。" = "Uses official effect data, processed locally by Liltiva. Sound may differ from the official client.";
+"随歌曲自动匹配音效" = "Automatically matches effects to each song";
+"根据歌曲情绪调音" = "Tunes the sound to each song’s mood";
+"为每首歌匹配调音，按偏好调整" = "Per-song tuning, shaped by your preferences";
+"已展开" = "Expanded";
+"已收起" = "Collapsed";
+"默认" = "Default";
+"已选 %lld 项" = "%lld selected";
+"暂无权益" = "Not included in your membership";
+"登录后查看可用音效" = "Sign in to see available effects";
+"音效列表加载失败，请重试" = "Could not load effects. Try again.";
+"音效列表更新失败，当前显示已加载的音效" = "Could not update effects. Showing previously loaded effects.";
+"免费" = "Free";
+
+"音源响应异常，请重试" = "The audio server returned an invalid response. Try again.";
+
+"此音源不支持跳转，请从头播放" = "This audio source does not support seeking. Play from the beginning.";
+
+"音源已更新，请重新播放" = "The audio source has changed. Restart playback.";
+
+"音频片段未下载完整，请重试" = "The audio segment did not finish downloading. Try again.";
+
+"已取消加载" = "Loading cancelled";
+
+"此音频格式暂不支持跳转播放" = "Seeking is not supported for this audio format.";
+
+"无法读取音频信息，请重试" = "Could not read the audio information. Try again.";
+
+"这首 MP3 缺少跳转索引，请从头播放" = "This MP3 has no seek index. Play from the beginning.";
+
+"无法定位播放位置，请重试" = "Could not locate the playback position. Try again.";
+
+"无法解码这段音频，请重试" = "Could not decode this audio segment. Try again.";

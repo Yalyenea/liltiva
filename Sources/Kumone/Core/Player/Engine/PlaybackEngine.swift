@@ -9,6 +9,13 @@ enum PlaybackEngineEvent: Sendable {
     case streamResumed
     case streamFailed(Error)
     case streamDownloadCompleted
+    case preparedStreamDownloadCompleted(remoteURL: URL, partURL: URL)
+    case preparedStreamFailed(remoteURL: URL, partURL: URL, Error)
+}
+
+struct PlaybackEngineEventDelivery: Sendable {
+    let event: PlaybackEngineEvent
+    fileprivate let sourceGeneration: Int?
 }
 
 /// One source at a time. PCM goes straight from the player node to the mixer;
@@ -18,6 +25,8 @@ enum PlaybackEngineEvent: Sendable {
 final class PlaybackEngine: @unchecked Sendable {
     let events: AsyncStream<PlaybackEngineEvent>
     private let continuation: AsyncStream<PlaybackEngineEvent>.Continuation
+    let eventDeliveries: AsyncStream<PlaybackEngineEventDelivery>
+    private let deliveryContinuation: AsyncStream<PlaybackEngineEventDelivery>.Continuation
     private let queue = DispatchQueue(label: "app.kumone.playback-engine")
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
@@ -32,8 +41,33 @@ final class PlaybackEngine: @unchecked Sendable {
         case file(AVAudioFile)
         case convertedFile(FileFeeder)
         case stream(ProgressiveLoader)
+        case remote(RemoteAudioLoader)
     }
     private var source: Source = .none
+    private struct StreamIdentity: Equatable {
+        let remote: URL
+        let formatHint: String?
+        let preserveSampleRate: Bool
+    }
+    private final class PreparedStream {
+        let identity: StreamIdentity
+        let partURL: URL
+        let loader: ProgressiveLoader
+        var format: AVAudioFormat?
+        var buffers: [AVAudioPCMBuffer] = []
+        var ended = false
+
+        init(identity: StreamIdentity, partURL: URL, loader: ProgressiveLoader) {
+            self.identity = identity
+            self.partURL = partURL
+            self.loader = loader
+        }
+    }
+    private var preparedStream: PreparedStream?
+    private var activeStreamIdentity: StreamIdentity?
+    private var activePartURL: URL?
+    private var sourceGeneration = 0
+    private let preparedStreamHighWater = 4
     private var nativePlayback: NativeAudioPlayback?
     private var nativeOutputDeviceUID: String?
     private var userVolume: Float = 1
@@ -56,8 +90,11 @@ final class PlaybackEngine: @unchecked Sendable {
 
     init() {
         var c: AsyncStream<PlaybackEngineEvent>.Continuation!
-        events = AsyncStream { c = $0 }
+        events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { c = $0 }
         continuation = c
+        var delivery: AsyncStream<PlaybackEngineEventDelivery>.Continuation!
+        eventDeliveries = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { delivery = $0 }
+        deliveryContinuation = delivery
         engine.attach(player)
         engine.attach(soundEqualizer)
         engine.attach(soundRenderer.node)
@@ -75,7 +112,9 @@ final class PlaybackEngine: @unchecked Sendable {
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         pauseDrain?.cancel()
         clockTimer?.cancel()
+        preparedStream?.loader.cancel()
         continuation.finish()
+        deliveryContinuation.finish()
     }
 
     var outputVolume: Float {
@@ -93,6 +132,17 @@ final class PlaybackEngine: @unchecked Sendable {
     var position: TimeInterval { queue.sync { positionLocked() } }
     var duration: TimeInterval? { queue.sync { durationLocked() } }
 
+    /// Check when consuming on the UI actor: an event can already be queued
+    /// when a later source replaces the one which produced it.
+    func isCurrent(_ delivery: PlaybackEngineEventDelivery) -> Bool {
+        queue.sync { delivery.sourceGeneration.map { $0 == sourceGeneration } ?? true }
+    }
+
+    private func emitLocked(_ event: PlaybackEngineEvent, prepared: Bool = false) {
+        continuation.yield(event)
+        deliveryContinuation.yield(.init(event: event, sourceGeneration: prepared ? nil : sourceGeneration))
+    }
+
     func loadNative(from url: URL, duration: Double) {
         queue.sync {
             resetLocked()
@@ -104,7 +154,7 @@ final class PlaybackEngine: @unchecked Sendable {
             ) { [weak self] event in
                 guard let self, self.generation == loadedGeneration,
                       self.nativePlayback != nil else { return }
-                self.continuation.yield(event)
+                self.emitLocked(event)
             }
         }
     }
@@ -140,7 +190,7 @@ final class PlaybackEngine: @unchecked Sendable {
             self.scheduleBufferLocked(buffer) { feeder.bufferPlayed() }
             if self.streamStalled {
                 self.streamStalled = false
-                self.continuation.yield(.streamResumed)
+                self.emitLocked(.streamResumed)
             }
             self.startNodeIfNeededLocked()
         }
@@ -152,43 +202,181 @@ final class PlaybackEngine: @unchecked Sendable {
         }
     }
 
-    func startStreaming(from remote: URL, formatHint: String?, writingTo partURL: URL) {
+    func prepareStream(from remote: URL, formatHint: String?, writingTo partURL: URL,
+                       preserveSampleRate: Bool = false) {
+        queue.async {
+            let identity = StreamIdentity(remote: remote, formatHint: formatHint?.lowercased(),
+                                          preserveSampleRate: preserveSampleRate)
+            if self.preparedStream?.identity == identity { return }
+            self.cancelPreparedStreamLocked()
+            // Preparing must never open a second writer over the current
+            // source's mirror, or decode that same source on a second loader.
+            guard self.activeStreamIdentity != identity, self.activePartURL != partURL else { return }
+            let loader = self.makeStreamLoaderLocked(identity: identity, partURL: partURL)
+            self.preparedStream = PreparedStream(identity: identity, partURL: partURL, loader: loader)
+            loader.start()
+        }
+    }
+
+    func cancelPreparedStream() { queue.async { self.cancelPreparedStreamLocked() } }
+
+    private func cancelPreparedStreamLocked() {
+        preparedStream?.loader.cancel()
+        preparedStream = nil
+    }
+
+    func startStreaming(from remote: URL, formatHint: String?, writingTo partURL: URL,
+                        preserveSampleRate: Bool = false) {
+        queue.async {
+            let identity = StreamIdentity(remote: remote, formatHint: formatHint?.lowercased(),
+                                          preserveSampleRate: preserveSampleRate)
+            let prepared = self.preparedStream.flatMap { $0.identity == identity ? $0 : nil }
+            self.resetLocked()
+            self.cancelPreparedStreamLocked(except: prepared?.loader)
+            self.activeStreamIdentity = identity
+            self.activePartURL = prepared?.partURL ?? partURL
+            self.streamStalled = true
+            if let prepared {
+                self.source = .stream(prepared.loader)
+                self.configureGraphFormatLocked(prepared.format ?? self.defaultStreamFormat)
+                for buffer in prepared.buffers { self.acceptStreamBufferLocked(buffer, loader: prepared.loader) }
+                self.streamEnded = prepared.ended
+                prepared.loader.setDownloadSuspended(false)
+            } else {
+                self.configureGraphFormatLocked(self.defaultStreamFormat)
+                let loader = self.makeStreamLoaderLocked(identity: identity, partURL: partURL)
+                self.source = .stream(loader)
+                loader.start()
+            }
+        }
+    }
+
+    /// A range-backed source can start at an uncached position without waiting
+    /// for the bytes before it. Opening and decoding stay on the loader queue.
+    func startRemote(from remote: URL, formatHint: String?, at seconds: TimeInterval,
+                     preserveSampleRate: Bool = false) {
         queue.async {
             self.resetLocked()
-            self.configureGraphFormatLocked(AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2)!)
-            let loader = ProgressiveLoader(remoteURL: remote, formatHint: formatHint,
-                                           partURL: partURL, output: self.graphFormat, queue: self.queue)
-            self.source = .stream(loader)
+            self.cancelPreparedStreamLocked()
+            self.configureGraphFormatLocked(self.defaultStreamFormat)
+            let position = max(0, seconds)
+            self.startOffset = position
+            self.lastKnownPosition = position
             self.streamStalled = true
-            loader.onBuffer = { [weak self, weak loader] buffer in
-                guard let self, let loader,
-                      case .stream(let current) = self.source, current === loader else { return }
-                self.scheduleBufferLocked(buffer)
-                if self.streamStalled {
-                    self.streamStalled = false
-                    self.continuation.yield(.streamResumed)
-                }
-                self.startNodeIfNeededLocked()
-                if self.pendingBuffers >= self.streamHighWater { loader.setDownloadSuspended(true) }
+            let loader = RemoteAudioLoader(remoteURL: remote, formatHint: formatHint,
+                                           output: self.defaultStreamFormat, queue: self.queue,
+                                           preserveSampleRate: preserveSampleRate, initialPosition: position)
+            self.source = .remote(loader)
+            self.wireRemoteLoaderLocked(loader)
+            loader.start()
+        }
+    }
+
+    private func wireRemoteLoaderLocked(_ loader: RemoteAudioLoader) {
+        loader.onFormat = { [weak self, weak loader] format in
+            guard let self, let loader,
+                  case .remote(let current) = self.source, current === loader else { return }
+            self.configureGraphFormatLocked(format)
+            // play() may precede format discovery. A source-rate rebuild stops
+            // the graph, so restart it before receiving the first PCM buffer.
+            if self.wantsPlayback && !self.isPaused { self.ensureEngineRunningLocked() }
+        }
+        loader.onBuffer = { [weak self, weak loader] buffer in
+            guard let self, let loader,
+                  case .remote(let current) = self.source, current === loader else { return }
+            self.scheduleBufferLocked(buffer)
+            if self.streamStalled {
+                self.streamStalled = false
+                self.emitLocked(.streamResumed)
             }
-            loader.onMirrorCompleted = { [weak self, weak loader] _ in
-                guard let self, let loader,
-                      case .stream(let current) = self.source, current === loader else { return }
-                self.continuation.yield(.streamDownloadCompleted)
+            self.startNodeIfNeededLocked()
+            if self.pendingBuffers >= self.streamHighWater { loader.setDownloadSuspended(true) }
+        }
+        loader.onCompleted = { [weak self, weak loader] in
+            guard let self, let loader,
+                  case .remote(let current) = self.source, current === loader else { return }
+            self.streamEnded = true
+            if self.pendingBuffers == 0 { self.handleFinishedLocked(generation: self.generation) }
+        }
+        loader.onError = { [weak self, weak loader] error in
+            guard let self, let loader,
+                  case .remote(let current) = self.source, current === loader else { return }
+            self.emitLocked(.streamFailed(error))
+        }
+    }
+
+    private var defaultStreamFormat: AVAudioFormat {
+        AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2)!
+    }
+
+    private func cancelPreparedStreamLocked(except promoted: ProgressiveLoader?) {
+        if let preparedStream, preparedStream.loader !== promoted { preparedStream.loader.cancel() }
+        preparedStream = nil
+    }
+
+    private func makeStreamLoaderLocked(identity: StreamIdentity, partURL: URL) -> ProgressiveLoader {
+        let loader = ProgressiveLoader(remoteURL: identity.remote, formatHint: identity.formatHint,
+                                       partURL: partURL, output: defaultStreamFormat, queue: queue,
+                                       preserveSampleRate: identity.preserveSampleRate)
+        loader.onFormat = { [weak self, weak loader] format in
+            guard let self, let loader else { return }
+            if let prepared = self.preparedStream, prepared.loader === loader {
+                prepared.format = format
+            } else if case .stream(let current) = self.source, current === loader {
+                self.configureGraphFormatLocked(format)
+                // Format detection may stop the graph after play() already
+                // ran. Restart it before the first buffer is scheduled.
+                if self.wantsPlayback && !self.isPaused { self.ensureEngineRunningLocked() }
             }
-            loader.onCompleted = { [weak self, weak loader] in
-                guard let self, let loader,
-                      case .stream(let current) = self.source, current === loader else { return }
+        }
+        loader.onBuffer = { [weak self, weak loader] buffer in
+            guard let self, let loader else { return }
+            if let prepared = self.preparedStream, prepared.loader === loader {
+                prepared.buffers.append(buffer)
+                if prepared.buffers.count >= self.preparedStreamHighWater { loader.setDownloadSuspended(true) }
+            } else if case .stream(let current) = self.source, current === loader {
+                self.acceptStreamBufferLocked(buffer, loader: loader)
+            }
+        }
+        loader.onMirrorCompleted = { [weak self, weak loader] _ in
+            guard let self, let loader else { return }
+            if let prepared = self.preparedStream, prepared.loader === loader {
+                self.emitLocked(.preparedStreamDownloadCompleted(remoteURL: identity.remote,
+                                                                 partURL: prepared.partURL), prepared: true)
+            } else if case .stream(let current) = self.source, current === loader {
+                self.emitLocked(.streamDownloadCompleted)
+            }
+        }
+        loader.onCompleted = { [weak self, weak loader] in
+            guard let self, let loader else { return }
+            if let prepared = self.preparedStream, prepared.loader === loader {
+                prepared.ended = true
+            } else if case .stream(let current) = self.source, current === loader {
                 self.streamEnded = true
                 if self.pendingBuffers == 0 { self.handleFinishedLocked(generation: self.generation) }
             }
-            loader.onError = { [weak self, weak loader] error in
-                guard let self, let loader,
-                      case .stream(let current) = self.source, current === loader else { return }
-                self.continuation.yield(.streamFailed(error))
-            }
-            loader.start()
         }
+        loader.onError = { [weak self, weak loader] error in
+            guard let self, let loader else { return }
+            if let prepared = self.preparedStream, prepared.loader === loader {
+                self.preparedStream = nil
+                self.emitLocked(.preparedStreamFailed(remoteURL: identity.remote, partURL: prepared.partURL, error),
+                                prepared: true)
+            } else if case .stream(let current) = self.source, current === loader {
+                self.emitLocked(.streamFailed(error))
+            }
+        }
+        return loader
+    }
+
+    private func acceptStreamBufferLocked(_ buffer: AVAudioPCMBuffer, loader: ProgressiveLoader) {
+        scheduleBufferLocked(buffer)
+        if streamStalled {
+            streamStalled = false
+            emitLocked(.streamResumed)
+        }
+        startNodeIfNeededLocked()
+        if pendingBuffers >= streamHighWater { loader.setDownloadSuspended(true) }
     }
 
     func play(from seconds: TimeInterval) {
@@ -253,10 +441,12 @@ final class PlaybackEngine: @unchecked Sendable {
     private func resetLocked() {
         cancelPauseDrainLocked()
         generation += 1
+        sourceGeneration += 1
         nativePlayback?.stop()
         nativePlayback = nil
         switch source {
         case .stream(let loader): loader.cancel()
+        case .remote(let loader): loader.cancel()
         case .convertedFile(let feeder): feeder.cancel()
         case .none, .file: break
         }
@@ -264,6 +454,8 @@ final class PlaybackEngine: @unchecked Sendable {
         soundEqualizer.reset()
         soundRenderer.node.reset()
         source = .none
+        activeStreamIdentity = nil
+        activePartURL = nil
         wantsPlayback = false
         isPaused = false
         startOffset = 0
@@ -292,7 +484,16 @@ final class PlaybackEngine: @unchecked Sendable {
             guard loader.canSeek, seeking || (seconds > 0.25 && abs(seconds - positionLocked()) > 0.5) else { return }
             resetScheduleLocked(from: seconds)
             streamStalled = true
-            continuation.yield(.streamStalled)
+            emitLocked(.streamStalled)
+            loader.seek(to: seconds)
+        case .remote(let loader):
+            // Loading already positioned this source. Initial play must retain
+            // its queued PCM; explicit seeks invalidate callbacks immediately.
+            guard seeking || abs(seconds - startOffset) > 0.001 else { return }
+            sourceGeneration += 1
+            resetScheduleLocked(from: seconds)
+            streamStalled = true
+            emitLocked(.streamStalled)
             loader.seek(to: seconds)
         }
     }
@@ -340,14 +541,19 @@ final class PlaybackEngine: @unchecked Sendable {
                 played?()
                 self.pendingBuffers -= 1
                 _ = self.positionLocked()
-                if case .stream(let loader) = self.source, self.pendingBuffers <= self.streamLowWater {
-                    loader.setDownloadSuspended(false)
+                if self.pendingBuffers <= self.streamLowWater {
+                    switch self.source {
+                    case .stream(let loader): loader.setDownloadSuspended(false)
+                    case .remote(let loader): loader.setDownloadSuspended(false)
+                    case .none, .file, .convertedFile: break
+                    }
                 }
                 guard self.pendingBuffers == 0, self.wantsPlayback else { return }
                 if self.streamEnded { self.handleFinishedLocked(generation: scheduledGeneration) }
                 else if !self.streamStalled {
+                    if case .remote = self.source { self.player.pause() }
                     self.streamStalled = true
-                    self.continuation.yield(.streamStalled)
+                    self.emitLocked(.streamStalled)
                 }
             }
         }
@@ -357,7 +563,7 @@ final class PlaybackEngine: @unchecked Sendable {
         guard self.generation == generation, wantsPlayback else { return }
         wantsPlayback = false
         if let duration = durationLocked() { lastKnownPosition = duration }
-        continuation.yield(.finished)
+        emitLocked(.finished)
     }
 
     private func ensureEngineRunningLocked() {
@@ -366,17 +572,20 @@ final class PlaybackEngine: @unchecked Sendable {
         do {
             try engine.start()
             startClockTimerLocked()
-        } catch { continuation.yield(.streamFailed(error)) }
+        } catch { emitLocked(.streamFailed(error)) }
     }
 
     private func startNodeIfNeededLocked(attempt: Int = 0) {
         guard wantsPlayback, !isPaused, engine.isRunning, !player.isPlaying else { return }
+        // An empty playing node advances its clock while HTTP is still
+        // buffering. Start the range source only after its first PCM arrives.
+        if case .remote = source, pendingBuffers == 0 { return }
         // CoreAudio can report the engine running before the player's first
         // IO cycle. Re-check intent before retrying its Objective-C exception.
         guard let exception = KumoneCatchException({ self.player.play() }) else { return }
         guard attempt < 40 else {
             PlaybackJournal.note("player start failed: " + (exception.reason ?? exception.name.rawValue))
-            continuation.yield(.streamFailed(URLError(.cannotOpenFile)))
+            emitLocked(.streamFailed(URLError(.cannotOpenFile)))
             return
         }
         let scheduledGeneration = generation
@@ -388,6 +597,7 @@ final class PlaybackEngine: @unchecked Sendable {
 
     private func positionLocked() -> TimeInterval {
         if let nativePlayback { return nativePlayback.position }
+        if case .remote = source, streamStalled { return lastKnownPosition }
         guard wantsPlayback, !isPaused,
               let time = player.lastRenderTime, time.isSampleTimeValid || time.isHostTimeValid,
               let rendered = player.playerTime(forNodeTime: time), rendered.sampleRate > 0 else {
@@ -404,6 +614,7 @@ final class PlaybackEngine: @unchecked Sendable {
         case .file(let file): return Double(file.length) / file.processingFormat.sampleRate
         case .convertedFile(let feeder): return feeder.duration
         case .stream(let loader): return loader.estimatedDuration
+        case .remote(let loader): return loader.estimatedDuration
         }
     }
 
@@ -517,6 +728,21 @@ final class PlaybackEngine: @unchecked Sendable {
     }
 
     #if DEBUG
+    var preparedStreamBufferCount: Int { queue.sync { preparedStream?.buffers.count ?? 0 } }
+    var preparedStreamLoaderID: ObjectIdentifier? { queue.sync { preparedStream.map { ObjectIdentifier($0.loader) } } }
+    var activeStreamLoaderID: ObjectIdentifier? {
+        queue.sync {
+            if case .stream(let loader) = source { return ObjectIdentifier(loader) }
+            return nil
+        }
+    }
+    var activeRemoteLoaderID: ObjectIdentifier? {
+        queue.sync {
+            if case .remote(let loader) = source { return ObjectIdentifier(loader) }
+            return nil
+        }
+    }
+    var scheduledBufferCount: Int { queue.sync { pendingBuffers } }
     var processingSampleRate: Double { queue.sync { graphFormat.sampleRate } }
     // Inspect actual source audio without changing user volume in regressions.
     var sourceVolume: Float { queue.sync { player.volume } }

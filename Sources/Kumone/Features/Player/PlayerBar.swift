@@ -6,6 +6,8 @@ struct PlayerBar: View {
     @EnvironmentObject private var settings: SettingsManager
     @EnvironmentObject private var account: AccountStore
     @ObservedObject private var shortcuts = ShortcutManager.shared
+    @Environment(\.openLogin) private var openLogin
+    @State private var showsSoundEffects = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -145,7 +147,7 @@ struct PlayerBar: View {
             .accessibilityLabel("评论")
             .accessibilityIdentifier("track-comments-button")
             qualityMenu(showsTitle: showsQualityTitle, diameter: diameter)
-            soundEffectMenu(diameter: diameter)
+            soundEffectButton(diameter: diameter)
             PlayerIconButton(icon: "inset.filled.bottomthird.square", size: 16,
                              diameter: diameter, isActive: settings.showDesktopLyrics) {
                 settings.showDesktopLyrics.toggle()
@@ -206,11 +208,8 @@ struct PlayerBar: View {
         .accessibilityValue(currentQuality.displayName)
     }
 
-    private func soundEffectMenu(diameter: CGFloat) -> some View {
-        // Effects have their own control so they remain discoverable beside quality.
-        Menu {
-            SoundEffectMenu()
-        } label: {
+    private func soundEffectButton(diameter: CGFloat) -> some View {
+        Button { showsSoundEffects.toggle() } label: {
             Label("音效", systemImage: "slider.horizontal.3")
                 .labelStyle(.iconOnly)
                 .font(.system(size: 14, weight: .medium))
@@ -218,14 +217,21 @@ struct PlayerBar: View {
                 .frame(width: diameter, height: diameter)
                 .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
         .fixedSize()
         .controlHint(player.selectedSoundEffectName)
         .accessibilityLabel("音效")
         .accessibilityIdentifier("sound-effect-menu")
         .accessibilityValue(player.selectedSoundEffectName)
-        .onAppear { player.loadSoundEffectCatalog() }
+        .popover(isPresented: $showsSoundEffects, arrowEdge: .top) {
+            ScrollView {
+                SoundEffectPanel(onLogin: {
+                    showsSoundEffects = false
+                    openLogin()
+                }).padding(20)
+            }
+            .frame(width: 390, height: 530)
+        }
     }
 }
 

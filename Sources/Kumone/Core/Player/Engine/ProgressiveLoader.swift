@@ -15,6 +15,27 @@ private let loaderPacketsProc: AudioFileStream_PacketsProc = { clientData, byteC
                        data: inputData, descriptions: descriptions)
 }
 
+private let loaderMirrorReadProc: AudioFile_ReadProc = { context, position, requested, destination, actual in
+    let reader = Unmanaged<FileHandle>.fromOpaque(context).takeUnretainedValue()
+    do {
+        try reader.seek(toOffset: UInt64(position))
+        let data = try reader.read(upToCount: Int(requested)) ?? Data()
+        data.withUnsafeBytes { raw in
+            if let base = raw.baseAddress { destination.copyMemory(from: base, byteCount: raw.count) }
+        }
+        actual.pointee = UInt32(data.count)
+        return noErr
+    } catch {
+        actual.pointee = 0
+        return kAudioFileUnspecifiedError
+    }
+}
+
+private let loaderMirrorSizeProc: AudioFile_GetSizeProc = { context in
+    let reader = Unmanaged<FileHandle>.fromOpaque(context).takeUnretainedValue()
+    return Int64((try? reader.seekToEnd()) ?? 0)
+}
+
 /// Streams a remote audio file, decodes it to PCM on the fly, and mirrors the
 /// raw bytes into a `.part` cache file (spec §3).
 ///
@@ -90,6 +111,7 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
     /// Decoded output format — the engine's fixed graph format; the
     /// converter resamples/remaps into it so the graph never reconfigures.
     private let outputFormat: AVAudioFormat
+    private let preserveSampleRate: Bool
     /// Where the result closures fire — the engine queue.
     private let callbackQueue: DispatchQueue
     /// Where all network/parse/decode/disk work runs.
@@ -115,6 +137,15 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
     /// the two pairs alternate and their capacity is actually reused.
     private var scratchPacketBytes: [UInt8] = []
     private var scratchPacketDescs: [AudioStreamPacketDescription] = []
+    // A converter may retain packets between pulls. Keep their backing
+    // storage intact when PCM backpressure yields to network mirroring.
+    private var hasPendingDecodeInput = false
+    private var converterInput: ConverterInput?
+    private var parsedPacketCount: Int64 = 0
+    private var tailFile: AudioFileID?
+    private var tailPacketIndex: Int64 = 0
+    private var tailPacketCount: Int64 = 0
+    private var tailChecked = false
     /// Feeds `pendingPacketBytes` to AudioConverterFillComplexBuffer.
     private let feed = ConverterFeed()
 
@@ -124,9 +155,9 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
     private var mirrorReadOffset: UInt64 = 0
     private var mirrorReadEnd: UInt64 = 0
     private var cacheAbandoned = false
+    private var mirrorCompleted = false
     private var cancelled = false
     private var failed = false
-    private var suspended = false
     private var needsDiscontinuity = false
     private var expectPartialContent = false
     /// The Range offset of the current request, so a retry on the twin host
@@ -157,6 +188,7 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
     // Written on workQueue during parsing; read from the engine queue for
     // seek decisions and duration estimates.
     private let statLock = NSLock()
+    private var requestedSuspension = false
     private var dataOffset: Int64 = 0
     private var audioDataByteCount: UInt64 = 0
     private var bitRate: UInt32 = 0
@@ -167,10 +199,11 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
     private var completed = false
 
     init(remoteURL: URL, formatHint: String?, partURL: URL,
-         output: AVAudioFormat, queue: DispatchQueue) {
+         output: AVAudioFormat, queue: DispatchQueue, preserveSampleRate: Bool = false) {
         self.remoteURL = NeteaseCDNHost.preferred(for: remoteURL)
         self.partURL = partURL
         self.outputFormat = output
+        self.preserveSampleRate = preserveSampleRate
         self.callbackQueue = queue
         switch formatHint?.lowercased() {
         case "mp3": typeHint = kAudioFileMP3Type
@@ -186,6 +219,7 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
     deinit {
         if let streamID { AudioFileStreamClose(streamID) }
         if let converter { AudioConverterDispose(converter) }
+        if let tailFile { AudioFileClose(tailFile) }
     }
 
     // MARK: - Estimates
@@ -234,12 +268,21 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
     /// Backpressure from the engine so decoded-but-unplayed PCM stays
     /// bounded. Pauses decoding, not the transfer — see the `backlog` note.
     func setDownloadSuspended(_ suspend: Bool) {
+        // The engine requests this from onBuffer. Publish it immediately so
+        // the current decode burst stops before producing another buffer.
+        statLock.lock()
+        requestedSuspension = suspend
+        statLock.unlock()
         workQueue.async {
-            guard !self.cancelled, !self.failed, !self.downloadFinished,
-                  suspend != self.suspended else { return }
-            self.suspended = suspend
+            guard !self.cancelled, !self.failed, !self.downloadFinished else { return }
             if !suspend { self.scheduleDrainIfNeeded() }
         }
+    }
+
+    private var suspended: Bool {
+        statLock.lock()
+        defer { statLock.unlock() }
+        return requestedSuspension
     }
 
     /// Restart the transfer from an estimated byte offset for `seconds`
@@ -309,6 +352,11 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
             AudioConverterDispose(converter)
             self.converter = nil
         }
+        converterInput = nil
+        if let tailFile { AudioFileClose(tailFile); self.tailFile = nil }
+        // Unique partial paths belong to this transfer. Retain completed
+        // mirrors until the consumer commits them; discard cancelled writes.
+        if !mirrorCompleted { try? FileManager.default.removeItem(at: partURL) }
         clearBacklog()
     }
 
@@ -329,9 +377,19 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
         if let converter { AudioConverterReset(converter) }
         pendingPacketBytes.removeAll()
         pendingPacketDescs.removeAll()
+        scratchPacketBytes.removeAll()
+        scratchPacketDescs.removeAll()
+        hasPendingDecodeInput = false
+        converterInput = nil
+        tailChecked = true // Seeking abandons the contiguous mirror.
+        if let tailFile { AudioFileClose(tailFile); self.tailFile = nil }
+        feed.packetCount = 0
+        feed.consumed = false
         resetAccum()
         needsDiscontinuity = true
-        suspended = false
+        statLock.lock()
+        requestedSuspension = false
+        statLock.unlock()
         clearBacklog()
         networkDone = false
         var offset = offsetBase + Int64(seconds * bps)
@@ -412,14 +470,19 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
 
     private func setUpConverter(streamID: AudioFileStreamID) {
         guard converter == nil else { return }
-        let output = outputFormat
         var inDesc = asbd
-        var outDesc = output.streamDescription.pointee
         guard inDesc.mSampleRate > 0, inDesc.mChannelsPerFrame > 0,
               inDesc.mFormatID != kAudioFormatLinearPCM else {
             fail(LoaderError.unsupportedFormat)
             return
         }
+        // High-resolution effects process each decoded block at the source
+        // rate. The engine receives onFormat before any PCM and reconnects its
+        // stopped graph, so no whole-file download or 44.1 kHz conversion is needed.
+        let output = preserveSampleRate
+            ? AVAudioFormat(standardFormatWithSampleRate: inDesc.mSampleRate, channels: 2)!
+            : outputFormat
+        var outDesc = output.streamDescription.pointee
         var newConverter: AudioConverterRef?
         guard AudioConverterNew(&inDesc, &outDesc, &newConverter) == noErr,
               let conv = newConverter else {
@@ -459,6 +522,7 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
                                    data: UnsafeRawPointer,
                                    descriptions: UnsafeMutablePointer<AudioStreamPacketDescription>?) {
         guard !failed, !cancelled, converter != nil, packetCount > 0 else { return }
+        parsedPacketCount += Int64(packetCount)
         statLock.lock()
         parsedAudioBytes += Int64(byteCount)
         statLock.unlock()
@@ -502,6 +566,7 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
             return
         }
         decodePendingPackets()
+        if hasPendingDecodeInput, !suspended { scheduleDrainIfNeeded() }
     }
 
     /// Sentinel the input proc returns when the queued packets are exhausted:
@@ -517,6 +582,32 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
         var channels: UInt32 = 1
         var consumed = false
         var atEOF = false
+    }
+
+    private final class ConverterInput {
+        let bytes: UnsafeMutableRawPointer
+        let descriptions: UnsafeMutablePointer<AudioStreamPacketDescription>
+        let byteCount: Int
+        let packetCount: UInt32
+
+        init(bytes source: [UInt8], descriptions packets: [AudioStreamPacketDescription]) {
+            byteCount = source.count
+            packetCount = UInt32(packets.count)
+            bytes = .allocate(byteCount: max(1, source.count), alignment: MemoryLayout<UInt8>.alignment)
+            descriptions = .allocate(capacity: max(1, packets.count))
+            source.withUnsafeBytes { raw in
+                if let base = raw.baseAddress { bytes.copyMemory(from: base, byteCount: raw.count) }
+            }
+            packets.withUnsafeBufferPointer { raw in
+                if let base = raw.baseAddress { descriptions.initialize(from: base, count: raw.count) }
+            }
+        }
+
+        deinit {
+            bytes.deallocate()
+            descriptions.deinitialize(count: Int(packetCount))
+            descriptions.deallocate()
+        }
     }
 
     private static let converterInputProc: AudioConverterComplexInputDataProc = { _, ioNumPackets, ioData, outDescs, userData in
@@ -536,51 +627,116 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
     }
 
     private func decodePendingPackets() {
-        guard let converter, !failed, !pendingPacketDescs.isEmpty else { return }
+        guard let converter, !failed, !cancelled else { return }
+        guard hasPendingDecodeInput || !pendingPacketDescs.isEmpty else { return }
         // Swap the queued packets into the scratch pair rather than copying
         // them into locals: a `let bytes = pendingPacketBytes` keeps a second
         // reference alive, so the `removeAll(keepingCapacity:)` below copies
         // on write and allocates a fresh buffer for every chunk. Swapping
         // makes the two buffers genuinely alternate, which is what the
         // retained capacity was for.
-        swap(&pendingPacketBytes, &scratchPacketBytes)
-        swap(&pendingPacketDescs, &scratchPacketDescs)
-        pendingPacketBytes.removeAll(keepingCapacity: true)
-        pendingPacketDescs.removeAll(keepingCapacity: true)
-        scratchPacketBytes.withUnsafeBytes { raw in
-            scratchPacketDescs.withUnsafeMutableBufferPointer { descPtr in
-                feed.bytes = raw.baseAddress
-                feed.byteCount = raw.count
-                feed.descs = descPtr.baseAddress
-                feed.packetCount = UInt32(descPtr.count)
-                feed.channels = asbd.mChannelsPerFrame
-                feed.consumed = false
-                feed.atEOF = false
-                pullDecodedFrames(converter)
-                feed.bytes = nil
-                feed.descs = nil
-                feed.packetCount = 0
-            }
+        if !hasPendingDecodeInput {
+            swap(&pendingPacketBytes, &scratchPacketBytes)
+            swap(&pendingPacketDescs, &scratchPacketDescs)
+            pendingPacketBytes.removeAll(keepingCapacity: true)
+            pendingPacketDescs.removeAll(keepingCapacity: true)
+            feed.packetCount = UInt32(scratchPacketDescs.count)
+            feed.channels = asbd.mChannelsPerFrame
+            feed.consumed = false
+            feed.atEOF = false
+            hasPendingDecodeInput = true
+            // CoreAudio owns these pointers until it requests input again.
+            // Native storage keeps that promise across workQueue yields;
+            // pointers borrowed from a Swift Array cannot span that lifetime.
+            converterInput = ConverterInput(bytes: scratchPacketBytes, descriptions: scratchPacketDescs)
+        }
+        guard let converterInput else { return }
+        feed.bytes = UnsafeRawPointer(converterInput.bytes)
+        feed.byteCount = converterInput.byteCount
+        feed.descs = converterInput.descriptions
+        let drained = pullDecodedFrames(converter)
+        feed.bytes = nil
+        feed.descs = nil
+        if drained {
+            hasPendingDecodeInput = false
+            feed.packetCount = 0
+            self.converterInput = nil
         }
     }
 
-    private func drainConverterTail() {
-        guard let converter, !failed else { return }
+    private func drainConverterTail() -> Bool {
+        guard let converter, !failed else { return true }
         feed.packetCount = 0
         feed.consumed = true
         feed.atEOF = true
-        pullDecodedFrames(converter)
+        let drained = pullDecodedFrames(converter)
         feed.atEOF = false
+        return drained
+    }
+
+    /// AudioFileStream has no EOF operation. Its FLAC parser waits for the
+    /// next sync header before publishing the final packet. Once the mirror
+    /// is complete, the file parser can supply exactly those missing packets.
+    /// Read through the open descriptor so cache promotion/eviction is safe.
+    private func recoverParserTail() -> Bool {
+        if !tailChecked {
+            tailChecked = true
+            guard asbd.mFormatID == kAudioFormatFLAC, mirrorCompleted, let mirrorReader else { return true }
+            var file: AudioFileID?
+            let opened = AudioFileOpenWithCallbacks(Unmanaged.passUnretained(mirrorReader).toOpaque(),
+                loaderMirrorReadProc, nil, loaderMirrorSizeProc, nil, kAudioFileFLACType, &file)
+            guard opened == noErr, let file else { fail(LoaderError.parseFailed(opened)); return false }
+            tailFile = file
+            var packets: UInt64 = 0
+            var size = UInt32(MemoryLayout<UInt64>.size)
+            let status = AudioFileGetProperty(file, kAudioFilePropertyAudioDataPacketCount, &size, &packets)
+            guard status == noErr else { fail(LoaderError.parseFailed(status)); return false }
+            tailPacketIndex = parsedPacketCount
+            tailPacketCount = Int64(packets)
+        }
+        guard let tailFile else { return true }
+        while tailPacketIndex < tailPacketCount {
+            guard !suspended else { return false }
+            var capacity: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            let status = AudioFileGetProperty(tailFile, kAudioFilePropertyPacketSizeUpperBound, &size, &capacity)
+            guard status == noErr, capacity > 0 else { fail(LoaderError.parseFailed(status)); return false }
+            var bytes = [UInt8](repeating: 0, count: Int(capacity))
+            var description = AudioStreamPacketDescription()
+            var count: UInt32 = 1
+            var byteCount = capacity
+            let read = AudioFileReadPacketData(tailFile, false, &byteCount, &description,
+                                               tailPacketIndex, &count, &bytes)
+            guard read == noErr, count == 1, byteCount > 0 else {
+                fail(LoaderError.parseFailed(read == noErr ? kAudioFileInvalidFileError : read))
+                return false
+            }
+            bytes.removeSubrange(Int(byteCount)..<bytes.count)
+            pendingPacketBytes = bytes
+            pendingPacketDescs = [description]
+            tailPacketIndex += 1
+            decodePendingPackets()
+            guard !failed, !hasPendingDecodeInput else { return false }
+        }
+        AudioFileClose(tailFile)
+        self.tailFile = nil
+        return true
     }
 
     /// Pull converted PCM out of the converter until the queued input runs
     /// dry (or, with `feed.atEOF`, until the tail is fully flushed).
-    private func pullDecodedFrames(_ converter: AudioConverterRef) {
-        guard let outFormat else { return }
-        let chunkFrames: AVAudioFrameCount = 8192
+    private func pullDecodedFrames(_ converter: AudioConverterRef) -> Bool {
+        guard let outFormat else { return true }
         let bytesPerFrame = UInt32(MemoryLayout<Float>.size)
-        while !failed {
-            guard let out = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: chunkFrames) else { return }
+        var pulledFrames: AVAudioFrameCount = 0
+        while !failed, !cancelled {
+            guard !suspended else { return false }
+            // Yield regularly even when the consumer discards old callbacks:
+            // cancellation and incoming mirror writes must get queue time.
+            guard pulledFrames < accumCapacity * 4 else { return false }
+            let chunkFrames = min(8192, accum.map { $0.frameCapacity - $0.frameLength } ?? 8192)
+            guard chunkFrames > 0,
+                  let out = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: chunkFrames) else { return true }
             // Capture the ABL pointer once: every access snapshots byte sizes
             // from the current frameLength (0 here), so sizes set through one
             // pointer are not seen through a second access.
@@ -597,14 +753,16 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
             if frames > 0 {
                 out.frameLength = AVAudioFrameCount(frames)
                 deliver(out)
+                pulledFrames += AVAudioFrameCount(frames)
             }
-            if status == Self.noDataNowStatus { return } // input exhausted for now
+            if status == Self.noDataNowStatus { return true } // input exhausted for now
             guard status == noErr else {
                 fail(LoaderError.decodeFailed(status))
-                return
+                return true
             }
-            if frames == 0 { return } // EOF flush complete
+            if frames == 0 { return true } // EOF flush complete
         }
+        return true
     }
 
     private func deliver(_ buffer: AVAudioPCMBuffer) {
@@ -612,7 +770,7 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
         decodedFrames += AVAudioFramePosition(buffer.frameLength)
         statLock.unlock()
         guard accum != nil else {
-            notify { self.onBuffer?(buffer) }
+            deliverBuffer(buffer)
             return
         }
         var offset: AVAudioFrameCount = 0
@@ -645,7 +803,15 @@ final class ProgressiveLoader: NSObject, @unchecked Sendable {
     private func flushAccum() {
         guard let full = accum, full.frameLength > 0, let outFormat else { return }
         accum = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: accumCapacity)
-        notify { self.onBuffer?(full) }
+        deliverBuffer(full)
+    }
+
+    private func deliverBuffer(_ buffer: AVAudioPCMBuffer) {
+        // All loader controls only enqueue work; none synchronously wait for
+        // workQueue. A synchronous delivery therefore cannot invert queue
+        // locks, and lets the consumer apply backpressure without PCM piling
+        // up in asynchronous callback closures.
+        callbackQueue.sync { self.onBuffer?(buffer) }
     }
 
     private func resetAccum() {
@@ -701,7 +867,7 @@ extension ProgressiveLoader: URLSessionDataDelegate {
                 self.fileHandle = nil
             }
         }
-        if suspended || backlogRemaining > 0 {
+        if suspended || hasPendingDecodeInput || backlogRemaining > 0 {
             // Paused (or a resume drain is still catching up): keep byte
             // order by appending behind the backlog instead of parsing now.
             do {
@@ -736,7 +902,7 @@ extension ProgressiveLoader: URLSessionDataDelegate {
         if let bytes = closeMirror() {
             notify { self.onMirrorCompleted?(bytes) }
         }
-        if suspended || backlogRemaining > 0 {
+        if suspended || hasPendingDecodeInput || backlogRemaining > 0 {
             // Completion surfaces after the backlog drains (drainStep calls
             // finishOnQueue); while suspended, the engine's low-water resume
             // restarts the drain.
@@ -790,6 +956,15 @@ extension ProgressiveLoader: URLSessionDataDelegate {
             return
         }
         guard !suspended else { return } // re-paused mid-drain; resume reschedules
+        if hasPendingDecodeInput {
+            decodePendingPackets()
+            guard !failed, !cancelled else { return }
+            if hasPendingDecodeInput {
+                if !suspended { scheduleDrainIfNeeded() }
+                return
+            }
+            guard !suspended else { return }
+        }
         if backlogRemaining > 0 {
             do {
                 if mirrorReadOffset < mirrorReadEnd {
@@ -813,7 +988,8 @@ extension ProgressiveLoader: URLSessionDataDelegate {
                 return
             }
         }
-        if backlogRemaining > 0 {
+        if hasPendingDecodeInput || backlogRemaining > 0 {
+            guard !suspended else { return }
             scheduleDrainIfNeeded()
         } else if networkDone {
             finishOnQueue()
@@ -828,6 +1004,7 @@ extension ProgressiveLoader: URLSessionDataDelegate {
         let bytes = (try? fileHandle.offset()).map(Int64.init) ?? 0
         try? fileHandle.close()
         self.fileHandle = nil
+        mirrorCompleted = true
         return bytes
     }
 
@@ -838,7 +1015,15 @@ extension ProgressiveLoader: URLSessionDataDelegate {
     /// go too; a later `seek` reopens both.
     private func finishOnQueue() {
         guard !downloadFinished, !failed, !cancelled else { return }
-        drainConverterTail()
+        guard !hasPendingDecodeInput else { return }
+        guard recoverParserTail() else {
+            if !failed, !suspended { scheduleDrainIfNeeded() }
+            return
+        }
+        guard drainConverterTail() else {
+            if !suspended { scheduleDrainIfNeeded() }
+            return
+        }
         flushAccum()
         statLock.lock()
         completed = true

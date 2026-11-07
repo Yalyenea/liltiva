@@ -71,9 +71,10 @@ enum AudioQuality: String, CaseIterable, Identifiable {
 
     var isSpatial: Bool { [.sky, .dolby, .vivid].contains(self) }
 
-    /// AVPlayer preserves the source's high sample rate and spatial metadata;
-    /// the PCM streaming graph uses stereo / 44.1 kHz.
-    var usesNativePlayback: Bool { [.hires, .jyeffect, .jymaster, .sky, .dolby, .vivid].contains(self) }
+    /// Spatial metadata belongs to the native renderer. Stereo high-resolution
+    /// sources share the PCM graph, so toggling effects never reloads the song.
+    var usesNativePlayback: Bool { isSpatial }
+    var preservesSampleRate: Bool { [.hires, .jyeffect, .jymaster].contains(self) }
 
     /// Enhanced and spatial editions are distinct mixes. A menu's order must
     /// never make one replace the recording the listener actually selected.

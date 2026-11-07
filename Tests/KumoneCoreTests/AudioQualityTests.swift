@@ -89,7 +89,8 @@ struct AudioQualityTests {
         #expect(AudioQuality.available(for: .free) == [.standard, .higher, .exhigh])
         #expect(AudioQuality.available(for: .vip) == [.standard, .higher, .exhigh, .lossless, .hires, .jyeffect])
         #expect(AudioQuality.available(for: .svip) == AudioQuality.allCases)
-        #expect(AudioQuality.hires.usesNativePlayback)
+        #expect(!AudioQuality.hires.usesNativePlayback)
+        #expect([AudioQuality.hires, .jyeffect, .jymaster].allSatisfy { $0.preservesSampleRate })
         #expect(AudioQuality.allCases.filter(\.isSpatial).allSatisfy { $0.usesNativePlayback })
     }
 

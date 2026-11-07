@@ -87,11 +87,18 @@ actor EngineAudioCache {
         return URL(fileURLWithPath: fileURL(for: key).path + Self.partSuffix)
     }
 
+    /// Each streaming attempt owns its mirror: cancelling a previous loader
+    /// must never truncate the next attempt's file when rapidly switching back.
+    nonisolated func newPartFileURL(for key: Key) -> URL {
+        ensureDirectory()
+        return directory.appendingPathComponent("\(fileName(for: key)).\(UUID().uuidString).part")
+    }
+
     /// Atomically promotes the `.part` file to the final cache entry, then
     /// runs LRU eviction (sparing the file just committed).
     @discardableResult
-    func commitPartFile(for key: Key) throws -> URL {
-        let part = partFileURL(for: key)
+    func commitPartFile(for key: Key, from source: URL? = nil) throws -> URL {
+        let part = source ?? partFileURL(for: key)
         let final = fileURL(for: key)
         if FileManager.default.fileExists(atPath: final.path) {
             try FileManager.default.removeItem(at: final)

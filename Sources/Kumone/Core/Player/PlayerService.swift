@@ -233,6 +233,9 @@ final class PlayerService: ObservableObject {
     /// which are never cached.
     private var currentCacheKey: EngineAudioCache.Key?
     private var currentRemoteURL: URL?
+    private var currentPartURL: URL?
+    private var currentFormatHint: String?
+    private var usingRemoteSource = false
     private var progressTimer: Timer?
     private var lastPlaybackCheckpoint = ContinuousClock.now
 
@@ -248,6 +251,9 @@ final class PlayerService: ObservableObject {
         return t.isFinite ? t : progress
     }
     private var resolveGeneration = 0
+    private var resolveTask: Task<Void, Never>?
+    private var sourceRequestedAt = ContinuousClock.now
+    private var reportedSourceReady = false
     /// A quality change resumes the listening session it interrupted. A
     /// restored checkpoint still needs the ordinary new-session start path.
     private var pendingQualityReload = false
@@ -257,6 +263,15 @@ final class PlayerService: ObservableObject {
     private var enginePaused = false
 
     private var prefetchTask: Task<Void, Never>?
+    private struct PreparedSource {
+        let trackID: Int
+        let quality: AudioQuality
+        let session: String?
+        let createdAt: Date
+        let resolved: ResolvedSource
+        let partURL: URL
+    }
+    private var preparedSource: PreparedSource?
     private var prefetchedFile: URL? { didSet { publishCacheFilesInUse() } }
     /// Complete cache file retained while its source is playing.
     private var loadedFile: URL? { didSet { publishCacheFilesInUse() } }
@@ -325,7 +340,7 @@ final class PlayerService: ObservableObject {
                 }
                 // The system advances its own clock; the manager only publishes
                 // a correction when needed, including when a stream stalls.
-                NowPlayingManager.shared.updateElapsed(seconds, rate: 1, periodic: true)
+                NowPlayingManager.shared.updateElapsed(seconds, rate: self.isBuffering ? 0 : 1, periodic: true)
                 if self.lastPlaybackCheckpoint.duration(to: .now) >= .seconds(20) {
                     self.persistState()
                 }
@@ -337,10 +352,11 @@ final class PlayerService: ObservableObject {
         progressTimer = timer
 
         Task { [weak self] in
-            guard let events = self?.engine.events else { return }
-            for await event in events {
+            guard let events = self?.engine.eventDeliveries else { return }
+            for await delivery in events {
                 guard let self else { return }
-                self.handleEngineEvent(event)
+                guard self.engine.isCurrent(delivery) else { continue }
+                self.handleEngineEvent(delivery.event)
             }
         }
 
@@ -463,18 +479,9 @@ final class PlayerService: ObservableObject {
         guard mode.minimumMembership <= AccountStore.shared.membershipTier else { return }
         let settings = SettingsManager.shared
         guard settings.soundEffectMode != mode else { return }
-        let quality = servedQuality.flatMap(AudioQuality.init) ?? AccountStore.shared.playbackQuality
-        let wasProcessing = wantsSoundEffect(for: quality)
         settings.soundEffectMode = mode
         resetSoundEffect()
-        if quality.usesNativePlayback, !quality.isSpatial, wasProcessing != wantsSoundEffect(for: quality),
-           let track = currentTrack {
-            // Native high-resolution playback and the local DSP require different
-            // sources. Preserve both the checkpoint and the user's paused intent.
-            startPlaying(track, resumeAt: livePlaybackTime, continuingCurrentTrack: true, autoplay: isPlaying)
-        } else {
-            refreshSoundEffect()
-        }
+        refreshSoundEffect()
     }
 
     func selectSoundEffectPreset(_ preset: SoundEffectPreset) {
@@ -677,14 +684,40 @@ final class PlayerService: ObservableObject {
         }
     }
 
-    /// `completion` runs once the playhead is at `seconds`. The engine seeks
-    /// synchronously, so it runs before this returns — the parameter exists for
-    /// the AVPlayer-shaped call sites in the UI.
+    /// Acknowledge the selected position immediately; isBuffering remains true
+    /// until audio at that position arrives. Scrubbing must not lock the UI
+    /// while the network reads a distant section of the song.
     func seek(to seconds: TimeInterval, completion: (@MainActor () -> Void)? = nil) {
+        guard seconds.isFinite else { completion?(); return }
+        let seconds = min(max(0, seconds), max(0, duration - 0.05))
         progress = seconds
         updateLyricsCursor(at: seconds)
-        engine.seek(to: seconds)
-        NowPlayingManager.shared.updateElapsed(seconds, rate: isPlaying ? 1 : 0)
+        if sourceLoaded, !hasLocalFile, !engine.usesNativePlayback,
+           let remote = currentRemoteURL, let track = currentTrack {
+            if let cached = currentLocalURL {
+                playLocalFile(cached, lease: nil, for: track, generation: resolveGeneration,
+                              from: seconds, quality: servedQuality)
+            } else if usingRemoteSource {
+                prefetchTask?.cancel()
+                prefetchTask = nil
+                preparedSource = nil
+                prefetchedFile = nil
+                engine.cancelPreparedStream()
+                sourceRequestedAt = .now
+                reportedSourceReady = false
+                isBuffering = true
+                engine.seek(to: seconds)
+            } else {
+                playRemoteSource(remote, for: track, from: seconds)
+            }
+        } else if !sourceLoaded, let track = currentTrack {
+            // Replace an unresolved request too, or it would later start at
+            // the position captured before this drag.
+            startPlaying(track, resumeAt: seconds, continuingCurrentTrack: true, autoplay: isPlaying)
+        } else {
+            engine.seek(to: seconds)
+        }
+        NowPlayingManager.shared.updateElapsed(seconds, rate: isPlaying && !isBuffering ? 1 : 0)
         persistState()
         completion?()
     }
@@ -939,6 +972,9 @@ final class PlayerService: ObservableObject {
     private func startPlaying(_ track: Track,
                               localLease: OfflinePlaybackLease? = nil, resumeAt: TimeInterval = 0,
                               continuingCurrentTrack: Bool = false, autoplay: Bool = true) {
+        sourceRequestedAt = .now
+        reportedSourceReady = false
+        PlaybackJournal.note("source requested id=\(track.id)")
         pendingQualityReload = continuingCurrentTrack
         resetSoundEffect()
         offlineScan?.cancel()
@@ -950,19 +986,26 @@ final class PlayerService: ObservableObject {
         releaseOfflineLease()
         prefetchTask?.cancel()
         prefetchTask = nil
-        prefetchedFile = nil
+        if !canReusePreparedSource(for: track) {
+            preparedSource = nil
+            prefetchedFile = nil
+            engine.cancelPreparedStream()
+        }
         currentLocalURL = nil
         currentCacheKey = nil
         currentRemoteURL = nil
-        if continuingCurrentTrack {
-            // Freeze the old source at the checkpoint while the replacement
-            // downloads; its end events must not advance this same song.
-            engine.stop()
-            loadedFile = nil
-        }
+        currentPartURL = nil
+        currentFormatHint = nil
+        usingRemoteSource = false
+        // Retire the audible source before awaiting any lookup. Otherwise the
+        // old song keeps playing under the new title throughout URL resolution.
+        engine.stop()
+        loadedFile = nil
+        resolveTask?.cancel()
+        resolveTask = nil
         sourceLoaded = false
         hasLocalFile = false
-        isBuffering = false
+        isBuffering = autoplay
         enginePaused = false
 
         if !continuingCurrentTrack {
@@ -983,7 +1026,7 @@ final class PlayerService: ObservableObject {
         let generation = resolveGeneration
 
         NowPlayingManager.shared.updateMetadata(for: track, duration: duration)
-        NowPlayingManager.shared.updateElapsed(resumeAt, rate: autoplay ? 1 : 0)
+        NowPlayingManager.shared.updateElapsed(resumeAt, rate: 0)
         persistState()
 
         if lyrics == nil {
@@ -992,7 +1035,7 @@ final class PlayerService: ObservableObject {
             }
         }
         guard autoplay else { return }
-        Task {
+        resolveTask = Task {
             await resolveAndLoad(track, generation: generation, localLease: localLease,
                                  resumeAt: resumeAt, continuingCurrentTrack: continuingCurrentTrack)
         }
@@ -1006,12 +1049,21 @@ final class PlayerService: ObservableObject {
         let durationMS: Int?
     }
 
+    private func canReusePreparedSource(for track: Track) -> Bool {
+        guard let preparedSource else { return false }
+        return preparedSource.trackID == track.id
+            && preparedSource.quality == AccountStore.shared.playbackQuality
+            && preparedSource.session == NeteaseClient.shared.authenticationFingerprint
+            && Date().timeIntervalSince(preparedSource.createdAt) < 300
+    }
+
     /// The full URL-resolution chain (quality fallback → https upgrade) plus
     /// cache-key derivation — shared by playback and prefetch so both always
     /// derive identical keys. Pure: no toasts, no state changes.
     private func resolveSource(for track: Track) async -> ResolvedSource? {
         let quality = AccountStore.shared.playbackQuality.rawValue
         var data = try? await NeteaseAPI.songURL(ids: [track.id], level: quality).first
+        guard !Task.isCancelled else { return nil }
         if data?.url == nil, quality != AudioQuality.standard.rawValue {
             data = try? await NeteaseAPI.songURL(ids: [track.id], level: AudioQuality.standard.rawValue).first
         }
@@ -1051,10 +1103,13 @@ final class PlayerService: ObservableObject {
             unavailableOffline(track, generation: generation)
             return
         }
-        let resolved = await resolveSource(for: track)
+        let resolved: ResolvedSource?
+        if canReusePreparedSource(for: track) { resolved = preparedSource?.resolved }
+        else { resolved = await resolveSource(for: track) }
         guard generation == resolveGeneration else { return }
 
         guard let resolved else {
+            isBuffering = false
             consecutiveFailures += 1
             let reason = track.playability(privilege: nil,
                                            isLoggedIn: AccountStore.shared.isLoggedIn,
@@ -1082,6 +1137,10 @@ final class PlayerService: ObservableObject {
             + "wanted=\(SettingsManager.shared.audioQuality.rawValue) "
             + (resolved.isTrial ? "trial " : ""))
         isTrial = resolved.isTrial
+        if let milliseconds = resolved.durationMS, milliseconds > 0 {
+            duration = Double(milliseconds) / 1000
+            NowPlayingManager.shared.updateMetadata(for: track, duration: duration)
+        }
         if resolved.isTrial {
             ToastCenter.shared.show(String(localized: "VIP 歌曲，当前为试听片段"))
         }
@@ -1089,95 +1148,47 @@ final class PlayerService: ObservableObject {
         let key = resolved.key
         currentCacheKey = resolved.isTrial ? nil : key
         currentRemoteURL = resolved.url
+        currentFormatHint = key.fileExtension
 
-        if let quality = AudioQuality(rawValue: resolved.level ?? key.level), quality.usesNativePlayback {
+        let sourceQuality = AudioQuality(rawValue: resolved.level ?? key.level)
+        if let quality = sourceQuality, quality.usesNativePlayback, !wantsSoundEffect(for: quality) {
             let cached = resolved.isTrial ? nil : await EngineAudioCache.shared.cachedFileURL(for: key)
             guard generation == resolveGeneration else { return }
-            if wantsSoundEffect(for: quality) {
-                isBuffering = true
-                do {
-                    let local: URL
-                    if let cached { local = cached }
-                    else { local = try await EngineAudioCache.shared.download(from: resolved.url, key: key) }
-                    guard generation == resolveGeneration else { return }
-                    playLocalFile(local, lease: nil, for: track, generation: generation,
-                                  from: resumeAt, quality: resolved.level)
-                } catch {
-                    guard generation == resolveGeneration else { return }
-                    isBuffering = false
-                    isPlaying = false
-                    engine.stop()
-                    NowPlayingManager.shared.updateElapsed(progress, rate: 0)
-                    ToastCenter.shared.show(error.localizedDescription)
-                }
-                return
+            if cached == nil, let transfer = await EngineAudioCache.shared.activeDownload(for: key) {
+                guard generation == resolveGeneration else { return }
+                transfer.cancel()
             }
+            guard generation == resolveGeneration else { return }
             playNativeSource(cached ?? NeteaseCDNHost.preferred(for: resolved.url), for: track, quality: resolved.level,
                              duration: resolved.durationMS.map { Double($0) / 1000 } ?? track.duration,
                              from: resumeAt)
             return
         }
 
-        // Progressive streams cannot seek before their bytes arrive. A received
-        // checkpoint therefore loads a complete file through the existing cache.
-        if resumeAt > 0 {
-            isBuffering = true
-            do {
-                let local: URL
-                if resolved.isTrial {
-                    // A preview needs a complete file to seek too, but must
-                    // stay in the same temporary slot used by trial streaming.
-                    let (data, response) = try await URLSession.shared.data(from: resolved.url)
-                    guard generation == resolveGeneration else { return }
-                    if let http = response as? HTTPURLResponse,
-                       !(200..<300).contains(http.statusCode) {
-                        throw URLError(.badServerResponse)
-                    }
-                    local = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("kumone-trial-\(track.id).part")
-                    try data.write(to: local, options: .atomic)
-                } else {
-                    local = try await EngineAudioCache.shared.download(from: resolved.url, key: key)
-                }
-                guard generation == resolveGeneration else { return }
-                playLocalFile(local, lease: nil, for: track, generation: generation, from: resumeAt,
-                              quality: resolved.level)
-                servedQuality = resolved.level
-                return
-            } catch {
-                guard generation == resolveGeneration else { return }
-                isBuffering = false
-                isPlaying = false
-                engine.stop()
-                NowPlayingManager.shared.updateElapsed(progress, rate: 0)
-                ToastCenter.shared.show(error.localizedDescription)
-                return
-            }
-        }
-
         engine.stop()
         loadedFile = nil
-        sourceLoaded = true
         hasLocalFile = false
 
         if !resolved.isTrial {
-            var local = await EngineAudioCache.shared.cachedFileURL(for: key)
+            let local = await EngineAudioCache.shared.cachedFileURL(for: key)
             if local == nil, let inflight = await EngineAudioCache.shared.activeDownload(for: key) {
-                // A prefetch of this very track is mid-flight — wait for it
-                // instead of opening a second transfer of the same file.
-                isBuffering = true
-                local = try? await inflight.value
-                isBuffering = false
+                guard generation == resolveGeneration else { return }
+                // Playback needs the first decoded chunk, not the entire file.
+                // Retire the full-file prefetch so it cannot compete for bandwidth.
+                inflight.cancel()
             }
             guard generation == resolveGeneration else { return }
             if let local,
                let fileDuration = try? engine.loadFile(
-                   at: local) {
+                   at: local, preserveSampleRate: sourceQuality?.preservesSampleRate == true) {
+                sourceLoaded = true
+                isBuffering = false
+                reportSourceReady()
                 hasLocalFile = true
                 loadedFile = local
                 currentLocalURL = local
                 if isPlaying {
-                    engine.play(from: 0)
+                    engine.play(from: min(resumeAt, max(0, fileDuration - 0.05)))
                     scrobbleStartIfNeeded(track)
                 } else {
                     enginePaused = false
@@ -1185,6 +1196,7 @@ final class PlayerService: ObservableObject {
                 pendingQualityReload = false
                 duration = fileDuration
                 NowPlayingManager.shared.updateMetadata(for: track, duration: fileDuration)
+                NowPlayingManager.shared.updateElapsed(resumeAt, rate: isPlaying ? 1 : 0)
                 refreshSoundEffect()
                 schedulePrefetch()
                 return
@@ -1193,6 +1205,11 @@ final class PlayerService: ObservableObject {
         }
         guard generation == resolveGeneration else { return }
 
+        if resumeAt > 0 {
+            playRemoteSource(resolved.url, for: track, from: resumeAt)
+            return
+        }
+
         let partURL: URL
         if resolved.isTrial {
             // Trial fragments never enter the cache; the mirror write goes to
@@ -1200,12 +1217,15 @@ final class PlayerService: ObservableObject {
             partURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("kumone-trial-\(track.id).part")
         } else {
-            partURL = EngineAudioCache.shared.partFileURL(for: key)
+            partURL = canReusePreparedSource(for: track)
+                ? preparedSource!.partURL : EngineAudioCache.shared.newPartFileURL(for: key)
         }
         // Buffering until the first decoded chunk lands (streamResumed).
+        sourceLoaded = true
         isBuffering = true
+        currentPartURL = partURL
         engine.startStreaming(from: resolved.url, formatHint: key.fileExtension,
-                              writingTo: partURL)
+                              writingTo: partURL, preserveSampleRate: sourceQuality?.preservesSampleRate == true)
         if isPlaying {
             engine.play(from: 0)
             scrobbleStartIfNeeded(track)
@@ -1215,17 +1235,51 @@ final class PlayerService: ObservableObject {
         pendingQualityReload = false
         refreshSoundEffect()
 
-        if let time = resolved.durationMS, time > 0 {
-            duration = TimeInterval(time) / 1000
-            NowPlayingManager.shared.updateMetadata(for: track, duration: duration)
-        }
-        schedulePrefetch()
     }
 
     // MARK: - Engine events
 
+    private func reportSourceReady() {
+        guard !reportedSourceReady, let track = currentTrack else { return }
+        reportedSourceReady = true
+        let elapsed = sourceRequestedAt.duration(to: .now).components
+        let milliseconds = elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000
+        PlaybackJournal.note("source ready id=\(track.id) after=\(milliseconds)ms quality=\(servedQuality ?? "?")")
+    }
+
+    private func playRemoteSource(_ url: URL, for track: Track, from position: Double) {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        preparedSource = nil
+        prefetchedFile = nil
+        engine.cancelPreparedStream()
+        sourceRequestedAt = .now
+        reportedSourceReady = false
+        PlaybackJournal.note("remote seek id=\(track.id) position=\(position)")
+        currentPartURL = nil
+        currentLocalURL = nil
+        loadedFile = nil
+        hasLocalFile = false
+        sourceLoaded = true
+        usingRemoteSource = true
+        progress = min(max(0, position), max(0, duration - 0.05))
+        isBuffering = true
+        enginePaused = false
+        pendingQualityReload = false
+        let quality = servedQuality.flatMap(AudioQuality.init) ?? AccountStore.shared.playbackQuality
+        engine.startRemote(from: url, formatHint: currentFormatHint, at: progress,
+                           preserveSampleRate: quality.preservesSampleRate)
+        if isPlaying {
+            engine.play(from: progress)
+            scrobbleStartIfNeeded(track)
+        }
+        refreshSoundEffect()
+        NowPlayingManager.shared.updateElapsed(progress, rate: 0)
+    }
+
     private func playNativeSource(_ url: URL, for track: Track, quality: String?, duration sourceDuration: Double,
                                   from position: Double = 0) {
+        usingRemoteSource = false
         engine.loadNative(from: url, duration: sourceDuration)
         sourceLoaded = true
         hasLocalFile = url.isFileURL
@@ -1244,7 +1298,7 @@ final class PlayerService: ObservableObject {
         }
         NowPlayingManager.shared.updateMetadata(for: track, duration: sourceDuration)
         refreshSoundEffect()
-        schedulePrefetch()
+        if url.isFileURL { schedulePrefetch() }
     }
 
     private func handleEngineEvent(_ event: PlaybackEngineEvent) {
@@ -1253,14 +1307,29 @@ final class PlayerService: ObservableObject {
             guard sourceLoaded else { return }
             handleItemEnded()
         case .streamStalled:
-            if sourceLoaded { isBuffering = true }
+            if sourceLoaded {
+                isBuffering = true
+                NowPlayingManager.shared.updateElapsed(livePlaybackTime, rate: 0)
+            }
         case .streamResumed:
-            if sourceLoaded { isBuffering = false }
+            if sourceLoaded {
+                reportSourceReady()
+                isBuffering = false
+                if usingRemoteSource, let actualDuration = engine.duration, actualDuration > 0,
+                   let track = currentTrack {
+                    duration = actualDuration
+                    NowPlayingManager.shared.updateMetadata(for: track, duration: actualDuration)
+                }
+                NowPlayingManager.shared.updateElapsed(livePlaybackTime, rate: isPlaying ? 1 : 0)
+                // Give the current stream its first audio before the next
+                // track's prefetch starts competing for the connection.
+                if prefetchTask == nil { schedulePrefetch() }
+            }
         case .streamDownloadCompleted:
-            guard let key = currentCacheKey else { return }
+            guard let key = currentCacheKey, let part = currentPartURL else { return }
             let generation = resolveGeneration
             Task { [weak self] in
-                guard let final = try? await EngineAudioCache.shared.commitPartFile(for: key),
+                guard let final = try? await EngineAudioCache.shared.commitPartFile(for: key, from: part),
                       let self, generation == self.resolveGeneration else { return }
                 self.currentLocalURL = final
                 // The progressive mirror just became a complete file: the words
@@ -1269,8 +1338,39 @@ final class PlayerService: ObservableObject {
                 // was still streaming (same-track repeat) — re-run it.
                 self.schedulePrefetch()
             }
+        case .preparedStreamDownloadCompleted(let remote, let part):
+            let key: EngineAudioCache.Key?
+            if let preparedSource, preparedSource.resolved.url == remote, preparedSource.partURL == part {
+                key = preparedSource.resolved.key
+            } else if currentRemoteURL == remote, currentPartURL == part {
+                key = currentCacheKey
+            } else { return }
+            guard let key else { return }
+            let session = NeteaseClient.shared.authenticationFingerprint
+            Task { [weak self] in
+                guard let file = try? await EngineAudioCache.shared.commitPartFile(for: key, from: part),
+                      let self, session == NeteaseClient.shared.authenticationFingerprint else { return }
+                if self.currentPartURL == part { self.currentLocalURL = file }
+                if self.preparedSource?.partURL == part { self.prefetchedFile = file }
+            }
+        case .preparedStreamFailed(_, let part, _):
+            if preparedSource?.partURL == part {
+                preparedSource = nil
+                prefetchedFile = nil
+            }
         case .streamFailed(let error):
             guard sourceLoaded else { return }
+            if usingRemoteSource {
+                // Keep the chosen position for an explicit retry. A range
+                // failure must not silently turn into a whole-file download.
+                pause()
+                engine.stop()
+                sourceLoaded = false
+                isBuffering = false
+                pendingQualityReload = true
+                ToastCenter.shared.show(error.localizedDescription)
+                return
+            }
             if engine.usesNativePlayback {
                 if let url = currentRemoteURL, let twin = NeteaseCDNHost.failover(from: url, after: error),
                    let track = currentTrack {
@@ -1293,48 +1393,14 @@ final class PlayerService: ObservableObject {
         }
     }
 
-    /// Progressive playback died (parse error, mid-file network loss, format
-    /// the stream parser can't resync): download the whole file instead and
-    /// resume near where it stopped.
+    /// The random-access decoder also handles containers the progressive
+    /// parser cannot resume. It fetches indexed ranges, never the whole file.
     private func handleStreamFailure() {
-        if isPlaying { isBuffering = true }
-        let generation = resolveGeneration
-        let resumeAt = progress
-        guard let key = currentCacheKey, let remote = currentRemoteURL,
-              let track = currentTrack else {
+        guard let remote = currentRemoteURL, let track = currentTrack else {
             streamFallbackFailed()
             return
         }
-        Task {
-            do {
-                let local = try await EngineAudioCache.shared.download(from: remote, key: key)
-                guard generation == resolveGeneration else { return }
-                let fileDuration = try engine.loadFile(at: local)
-                loadedFile = local
-                hasLocalFile = true
-                currentLocalURL = local
-                isBuffering = false
-                duration = fileDuration
-                if isPlaying {
-                    engine.play(from: min(resumeAt, max(0, fileDuration - 1)))
-                } else {
-                    // The user paused mid-stream: stay silent. The play
-                    // button re-issues play() from `progress`.
-                    enginePaused = false
-                }
-                NowPlayingManager.shared.updateMetadata(for: track, duration: fileDuration)
-                schedulePrefetch()
-            } catch {
-                guard generation == resolveGeneration else { return }
-                // The network is gone mid-song; a download of it plays on.
-                if let lease = await acquireOfflineLease(for: track, generation: generation, anyQuality: true) {
-                    playLocalFile(lease.url, lease: lease, for: track, generation: generation, from: resumeAt)
-                    return
-                }
-                guard generation == resolveGeneration else { return }
-                streamFallbackFailed()
-            }
-        }
+        playRemoteSource(remote, for: track, from: progress)
     }
 
     private func streamFallbackFailed() {
@@ -1364,19 +1430,41 @@ final class PlayerService: ObservableObject {
 
     /// Fill the ordinary audio cache without changing queue order or playback.
     private func schedulePrefetch() {
+        // Keep an eligible in-flight preload intact when the current mirror
+        // finishes or the queue publishes the same next song again.
+        if let target = autoAdvanceTarget(), !usesOfflineQueue, canReusePreparedSource(for: target) { return }
         prefetchTask?.cancel()
+        prefetchTask = nil
+        preparedSource = nil
+        engine.cancelPreparedStream()
         prefetchedFile = nil
         guard !usesOfflineQueue, let target = autoAdvanceTarget(),
               target.id != currentTrack?.id || hasLocalFile else { return }
         let generation = resolveGeneration
+        let quality = AccountStore.shared.playbackQuality
+        let session = NeteaseClient.shared.authenticationFingerprint
         prefetchTask = Task { [weak self] in
             guard let self,
                   let resolved = await self.resolveSource(for: target), !resolved.isTrial,
                   !Task.isCancelled, generation == self.resolveGeneration,
-                  let local = try? await EngineAudioCache.shared.download(from: resolved.url, key: resolved.key),
-                  !Task.isCancelled, generation == self.resolveGeneration,
                   self.autoAdvanceTarget()?.id == target.id else { return }
-            self.prefetchedFile = local
+            let part = EngineAudioCache.shared.newPartFileURL(for: resolved.key)
+            self.preparedSource = PreparedSource(trackID: target.id, quality: quality, session: session,
+                                                  createdAt: Date(), resolved: resolved, partURL: part)
+            if let cached = await EngineAudioCache.shared.cachedFileURL(for: resolved.key) {
+                guard !Task.isCancelled, generation == self.resolveGeneration else { return }
+                self.prefetchedFile = cached
+                return
+            }
+            guard !Task.isCancelled, generation == self.resolveGeneration else { return }
+            let served = resolved.level.flatMap(AudioQuality.init) ?? quality
+            if !served.usesNativePlayback || self.wantsSoundEffect(for: served) {
+                self.engine.prepareStream(from: resolved.url, formatHint: resolved.key.fileExtension,
+                                          writingTo: part, preserveSampleRate: served.preservesSampleRate)
+            } else if let local = try? await EngineAudioCache.shared.download(from: resolved.url, key: resolved.key),
+                      !Task.isCancelled, generation == self.resolveGeneration {
+                self.prefetchedFile = local
+            }
         }
     }
 
@@ -1441,6 +1529,8 @@ final class PlayerService: ObservableObject {
         servedQuality = lease?.descriptor.identity.quality ?? quality
         currentCacheKey = nil
         currentRemoteURL = nil
+        currentFormatHint = nil
+        usingRemoteSource = false
         let sourceQuality = servedQuality.flatMap(AudioQuality.init) ?? AccountStore.shared.playbackQuality
         if sourceQuality.usesNativePlayback && !wantsSoundEffect(for: sourceQuality) {
             offlinePlaybackLease = lease
@@ -1450,7 +1540,7 @@ final class PlayerService: ObservableObject {
         }
         engine.stop()
         loadedFile = nil
-        guard let fileDuration = try? engine.loadFile(at: url, preserveSampleRate: sourceQuality.usesNativePlayback) else {
+        guard let fileDuration = try? engine.loadFile(at: url, preserveSampleRate: sourceQuality.preservesSampleRate) else {
             if let lease { Task { try? await OfflineStore.shared.release(lease) } }
             sourceLoaded = false
             unavailableOffline(track, generation: generation)
@@ -1464,13 +1554,15 @@ final class PlayerService: ObservableObject {
         currentLocalURL = lease == nil && !isTrial ? url : nil
         isBuffering = false
         duration = fileDuration
+        reportSourceReady()
         if isPlaying {
-            engine.play(from: min(position, max(0, fileDuration - 1)))
+            engine.play(from: min(position, max(0, fileDuration - 0.05)))
             scrobbleStartIfNeeded(track)
         } else {
             enginePaused = false
         }
         NowPlayingManager.shared.updateMetadata(for: track, duration: fileDuration)
+        NowPlayingManager.shared.updateElapsed(progress, rate: isPlaying ? 1 : 0)
         refreshSoundEffect()
         schedulePrefetch()
     }
@@ -1481,6 +1573,11 @@ final class PlayerService: ObservableObject {
         sourceLoaded = false
         hasLocalFile = false
         currentLocalURL = nil
+        currentPartURL = nil
+        currentRemoteURL = nil
+        currentCacheKey = nil
+        currentFormatHint = nil
+        usingRemoteSource = false
     }
 
     private func releaseOfflineLease() {
@@ -1575,12 +1672,9 @@ final class PlayerService: ObservableObject {
         offlineScan = nil
         offlineScanID = UUID()
         offlineIssue = nil
-        guard offlinePlaybackLease != nil else { return }
-        resolveGeneration += 1
-        stopForOffline()
-        releaseOfflineLease()
-        isPlaying = false
-        NowPlayingManager.shared.updateElapsed(progress, rate: 0)
+        // Network resolutions and preloads belong to the account too. Retire
+        // them even when the current source has no offline lease.
+        suspendForAccountChange()
     }
 
     // MARK: - Scrobble
@@ -1736,11 +1830,15 @@ final class PlayerService: ObservableObject {
     func suspendForAccountChange() {
         resetSoundEffect()
         resolveGeneration += 1
+        resolveTask?.cancel()
+        resolveTask = nil
         scrobbled = true
         pause()
         stopForOffline()
         releaseOfflineLease()
         prefetchTask?.cancel()
+        preparedSource = nil
+        engine.cancelPreparedStream()
     }
 
     private func persistState() {

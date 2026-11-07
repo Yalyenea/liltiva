@@ -7,12 +7,13 @@
 `---` 分隔，随后是完整的**中文**部分（`### 新增` / `### 修复` / `### 改进`）。英文块与中文块
 的条目一一对应、顺序一致。（0.3.19 起采用此双语分块格式；更早的版本沿用旧的中英交替格式。）
 
-## Unreleased - 2026-10-31
+## Unreleased - 2026-11-07
 
 ### Added
 
+- **macOS**: start and seek uncached FLAC, MP3 and M4A audio through bounded HTTP range reads; retain high-resolution effects and paused intent, and report unavailable seek indexes or unsupported range responses without downloading the whole file. VBR MP3 positioning depends on its seek index precision.
 - **macOS**: add personal profiles with playlists, following, followers, posts, a following feed and listening charts, plus a message center for private-message history, comments, mentions, notifications and unread counts; paged data stays isolated to the signed-in account.
-- **macOS**: expand playback quality choices according to active VIP and SVIP benefits, including Hi-Res, master and spatial formats; use native playback for high-resolution and spatial sources and apply the eligible quality to downloads.
+- **macOS**: expand playback quality choices according to active VIP and SVIP benefits, including Hi-Res, master and spatial formats; preserve the original sample rate for high-resolution sources, use native rendering for spatial audio and apply the eligible quality to downloads.
 - **macOS**: add SVIP AI tuning with independent NCAE decoding, official per-song EQ, adjustable strength, five personal preferences and account-scoped offline caching; process high-resolution sources at their original sample rate.
 - **macOS**: add smart and preset effects with local stereo, reverb and impulse-response processing, plus explicitly labeled local emotion tuning based on official song analysis; check account entitlements before applying effects.
 - **macOS**: add interface-language selection for system, Simplified Chinese and English, with an in-app restart action.
@@ -20,6 +21,7 @@
 
 ### Fixed
 
+- **macOS**: stop the previous source immediately on track changes, reject stale playback callbacks, keep the clock still while buffering, retire account-owned requests on account changes and recover the final FLAC packet without losing tail audio.
 - **macOS**: keep the tonearm lifted while paused across window layout updates and rapid play/pause changes.
 - **macOS**: preserve playlist search input, text composition and keyboard selection during filtering.
 - **macOS**: clear EQ, reverb and convolution history when seeking so audio from the previous position does not carry over.
@@ -31,6 +33,8 @@
 
 ### Improved
 
+- **macOS**: stream stereo high-resolution audio through the effects chain at its source rate, switch effects without reloading the song, promote preloaded streams without restarting transfers and bound decoded audio buffers.
+- **macOS**: share a compact effects panel between the playback bar and settings, with a master switch, applied status, AI preferences and entitlement-aware presets.
 - **macOS**: release covered and hidden artwork directly, reduce redundant system playback updates, and replace animated spectrum bars with a static current-track icon; remove spectrum analysis from playback.
 
 - **macOS**: streamline settings with compact sections, fewer repeated headings and aligned controls; retain original Chinese quality and effect names while localizing surrounding controls and status text.
@@ -58,8 +62,9 @@
 
 ### 新增
 
+- **macOS**：通过有界的 HTTP 范围读取支持无缓存 FLAC、MP3、M4A 中途起播和跳转，保留高解析音效与暂停状态；缺少跳转索引或服务器不支持范围读取时明确提示，不再等待整首下载。可变码率 MP3 的定位精度取决于文件索引。
 - **macOS**：新增个人主页，可查看歌单、关注、粉丝、个人动态、关注动态和听歌排行；新增消息中心，可查看私信历史、评论、提及、通知和未读数量；分页数据按登录账号隔离。
-- **macOS**：根据有效的 VIP、SVIP 权益逐级开放音质选项，覆盖 Hi-Res、母带和空间音频；高解析与空间音源使用原生播放路径，下载也采用账号可用的音质。
+- **macOS**：根据有效的 VIP、SVIP 权益逐级开放音质选项，覆盖 Hi-Res、母带和空间音频；高解析音源保留原始采样率，空间音频使用原生渲染，下载也采用账号可用的音质。
 - **macOS**：新增 SVIP AI 调音，独立解码 NCAE 音效包，应用官方逐曲均衡参数，支持强度调节、五项个性偏好和按账号缓存离线参数；高解析音源按源采样率处理。
 - **macOS**：接入智能音效和预设音效，支持本地立体声、混响及脉冲响应处理；根据官方歌曲分析数据提供明确标注的本地情绪调音，应用音效前校验账号权益。
 - **macOS**：新增界面语言选项，支持跟随系统、简体中文和 English，并提供应用内重启。
@@ -67,6 +72,7 @@
 
 ### 修复
 
+- **macOS**：切歌立即停止旧音源，过滤过时播放回调，缓冲期间保持进度，切换账号时取消旧请求，并补齐 FLAC 最后一个数据包，避免尾音丢失。
 - **macOS**：暂停时保持唱臂抬起，窗口布局变化和快速切换播放状态也能保持正确位置。
 - **macOS**：筛选歌单时保留搜索输入、中文组词和键盘选中状态。
 - **macOS**：拖动播放进度时清空均衡、混响和卷积处理的历史，避免前一位置的声音残留。
@@ -78,6 +84,8 @@
 
 ### 改进
 
+- **macOS**：高解析立体声音源按原采样率流式处理音效，切换音效无需重新加载歌曲；预加载音源直接接入播放，复用传输并限制已解码音频缓冲。
+- **macOS**：播放栏与设置页共用紧凑音效面板，集中展示总开关、应用状态、AI 偏好和按会员权益开放的预设。
 - **macOS**：直接释放被遮盖页面和隐藏窗口的封面资源，减少重复的系统播放信息更新；将动态频谱条替换为静态当前歌曲图标，并移除播放中的频谱分析。
 
 - **macOS**：设置页采用紧凑分区，删除重复标题并对齐控件；音质和音效保留原本的中文名称，其余控件与状态文案随界面语言切换。
