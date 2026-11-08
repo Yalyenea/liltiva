@@ -42,6 +42,7 @@ struct SettingsPickerOption<Value: Hashable>: Equatable {
     let value: Value
     let title: String
     var isEnabled = true
+    var symbol: String? = nil
 }
 
 struct SettingsPicker<Value: Hashable>: View {
@@ -61,63 +62,107 @@ struct SettingsPicker<Value: Hashable>: View {
         HStack(spacing: 16) {
             Text(LocalizedStringKey(title))
             Spacer(minLength: 12)
-            SettingsPopUpButton(title: NSLocalizedString(title, comment: ""), selection: $selection, options: options)
-                .frame(width: width, height: 22)
+            SettingsChoiceButton(title: NSLocalizedString(title, comment: ""), selection: $selection,
+                                 options: options, width: width)
         }
     }
 }
 
-/// A native popup keeps the actual bezel at the requested width. SwiftUI's
-/// macOS menu styles shrink their bezel to the label even inside a fixed frame.
-private struct SettingsPopUpButton<Value: Hashable>: NSViewRepresentable {
+/// Settings values and the compact category header share the same popup.
+struct SettingsChoiceButton<Value: Hashable>: View {
     let title: String
     @Binding var selection: Value
     let options: [SettingsPickerOption<Value>]
-    @Environment(\.isEnabled) private var isEnabled
+    var width: CGFloat = 128
+    @State private var isPresented = false
+    @State private var highlighted: Value?
+    @FocusState private var isFocused: Bool
 
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeNSView(context: Context) -> NSPopUpButton {
-        let button = NSPopUpButton(frame: .zero, pullsDown: false)
-        button.controlSize = .small
-        button.font = .systemFont(ofSize: 13)
-        button.bezelStyle = .rounded
-        button.contentTintColor = NSColor(Theme.accent)
-        button.autoenablesItems = false
-        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        button.target = context.coordinator
-        button.action = #selector(Coordinator.selectOption(_:))
-        return button
+    private var selectedOption: SettingsPickerOption<Value>? {
+        options.first { $0.value == selection }
     }
 
-    func updateNSView(_ button: NSPopUpButton, context: Context) {
-        let previous = context.coordinator.parent.options
-        context.coordinator.parent = self
-        // Rebuilding a tracking menu on unrelated player updates disrupts input.
-        if previous != options || button.numberOfItems != options.count {
-            button.removeAllItems()
-            for option in options {
-                button.addItem(withTitle: option.title)
-                button.lastItem?.isEnabled = option.isEnabled
+    var body: some View {
+        Button { isPresented.toggle() } label: {
+            HStack(spacing: 6) {
+                if let symbol = selectedOption?.symbol {
+                    Image(systemName: symbol).foregroundStyle(Theme.accent)
+                }
+                Text(selectedOption?.title ?? "")
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
+            .font(.system(size: 13))
+            .padding(.horizontal, 8)
+            .frame(width: width, height: 22)
+            .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
         }
-        button.selectItem(at: options.firstIndex(where: { $0.value == selection }) ?? -1)
-        button.isEnabled = isEnabled
-        button.setAccessibilityLabel(title)
+        .buttonStyle(.plain)
+        .noFocusRing()
+        .accessibilityLabel(title)
+        .accessibilityValue(selectedOption?.title ?? "")
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(options, id: \.value) { option in
+                    PopupRow(isSelected: option.value == selection,
+                             isHighlighted: highlighted == option.value,
+                             onHover: { if $0 && option.isEnabled { highlighted = option.value } },
+                             action: { select(option) }) {
+                        HStack(spacing: 10) {
+                            if let symbol = option.symbol {
+                                Image(systemName: symbol)
+                                    .foregroundStyle(Theme.accent)
+                                    .frame(width: 18)
+                            }
+                            Text(option.title)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    .disabled(!option.isEnabled)
+                }
+            }
+            .padding(8)
+            .frame(width: max(200, width))
+            .focusable()
+            .focusEffectDisabled()
+            .focused($isFocused)
+            .defaultFocus($isFocused, true)
+            .onKeyPress(.downArrow) { moveHighlight(by: 1); return .handled }
+            .onKeyPress(.upArrow) { moveHighlight(by: -1); return .handled }
+            .onKeyPress(.return) { activateHighlight(); return .handled }
+            .onKeyPress(.space) { activateHighlight(); return .handled }
+            .onExitCommand { isPresented = false }
+            .onAppear {
+                highlighted = options.first { $0.value == selection && $0.isEnabled }?.value
+                    ?? options.first { $0.isEnabled }?.value
+                isFocused = true
+            }
+            .popupSurface()
+        }
     }
 
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
-        CGSize(width: proposal.width ?? 128, height: 22)
+    private func select(_ option: SettingsPickerOption<Value>) {
+        guard option.isEnabled else { return }
+        selection = option.value
+        isPresented = false
     }
 
-    final class Coordinator: NSObject {
-        var parent: SettingsPopUpButton
-        init(_ parent: SettingsPopUpButton) { self.parent = parent }
-        @objc func selectOption(_ button: NSPopUpButton) {
-            let index = button.indexOfSelectedItem
-            guard parent.options.indices.contains(index), parent.options[index].isEnabled else { return }
-            parent.selection = parent.options[index].value
-        }
+    private func activateHighlight() {
+        guard let option = options.first(where: { $0.value == highlighted }) else { return }
+        select(option)
+    }
+
+    private func moveHighlight(by offset: Int) {
+        // Skip unavailable choices so keyboard selection matches mouse input.
+        let enabled = options.filter(\.isEnabled)
+        guard !enabled.isEmpty else { return }
+        let current = enabled.firstIndex { $0.value == highlighted } ?? (offset > 0 ? -1 : enabled.count)
+        let next = min(max(current + offset, 0), enabled.count - 1)
+        highlighted = enabled[next].value
     }
 }
 

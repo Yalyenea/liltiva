@@ -201,6 +201,12 @@ struct DownloadedMusicView: View {
 struct DownloadTasksView: View {
     @ObservedObject private var downloads = DownloadManager.shared
     @State private var confirmCancelAll = false
+    @State private var showsMoreActions = false
+    @State private var highlightedAction: MoreAction?
+
+    private enum MoreAction: Hashable {
+        case retry, cancel
+    }
 
     private var displayedJobs: [DownloadJob] {
         let jobs = downloads.pendingJobs
@@ -231,25 +237,17 @@ struct DownloadTasksView: View {
                                 Task { await downloads.resumeAll(allowsMetered: metered) }
                             }
                         }
-                        Menu {
-                            Button("重试失败任务") {
-                                let count = downloads.pendingJobs.filter {
-                                    [.failed, .unavailable].contains($0.status)
-                                }.count
-                                MeteredDownloadCenter.shared.request(
-                                    bulk: true, count: count, network: downloads.network
-                                ) { metered in
-                                    Task { await downloads.resumeAll(failedOnly: true, allowsMetered: metered) }
-                                }
-                            }
-                            Button("取消未完成任务", role: .destructive) { confirmCancelAll = true }
-                        } label: {
+                        Button { showsMoreActions.toggle() } label: {
                             Image(systemName: "ellipsis")
                                 .font(.system(size: 13, weight: .semibold))
                                 .frame(width: 30, height: 30)
                                 .background(.primary.opacity(0.06), in: Circle())
                         }
-                        .menuStyle(.borderlessButton)
+                        .buttonStyle(.plain)
+                        .noFocusRing()
+                        .popover(isPresented: $showsMoreActions, arrowEdge: .bottom) {
+                            moreActions
+                        }
                         .fixedSize()
                         .accessibilityLabel("更多下载操作")
                         .disabled(downloads.pendingJobs.isEmpty)
@@ -280,6 +278,45 @@ struct DownloadTasksView: View {
             }
             Button("保留任务", role: .cancel) {}
         } message: { Text("已完成的下载会保留。") }
+    }
+
+    private var moreActions: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            PopupRow(isHighlighted: highlightedAction == .retry,
+                     onHover: { if $0 { highlightedAction = .retry } },
+                     action: { perform(.retry) }) {
+                Text("重试失败任务")
+            }
+            PopupRow(isHighlighted: highlightedAction == .cancel,
+                     onHover: { if $0 { highlightedAction = .cancel } },
+                     action: { perform(.cancel) }) {
+                Text("取消未完成任务").foregroundStyle(.red)
+            }
+        }
+        .padding(8)
+        .frame(width: 230)
+        .onAppear { highlightedAction = nil }
+        .popupKeyboardNavigation(items: [MoreAction.retry, .cancel], highlighted: $highlightedAction,
+                                 onSelect: perform, onDismiss: { showsMoreActions = false })
+        .popupSurface()
+    }
+
+    private func perform(_ action: MoreAction) {
+        // Close the popup before presenting a confirmation or metered-network prompt.
+        showsMoreActions = false
+        switch action {
+        case .retry:
+            let count = downloads.pendingJobs.filter {
+                [.failed, .unavailable].contains($0.status)
+            }.count
+            MeteredDownloadCenter.shared.request(
+                bulk: true, count: count, network: downloads.network
+            ) { metered in
+                Task { await downloads.resumeAll(failedOnly: true, allowsMetered: metered) }
+            }
+        case .cancel:
+            confirmCancelAll = true
+        }
     }
 
     private func taskButton(_ title: LocalizedStringKey, icon: String, enabled: Bool, action: @escaping () -> Void) -> some View {

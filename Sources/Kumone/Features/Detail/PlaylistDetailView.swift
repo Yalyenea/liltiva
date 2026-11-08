@@ -212,6 +212,7 @@ struct PlaylistDetailView: View {
                                 .frame(idealWidth: 320, maxWidth: 360, alignment: .leading)
                         }
                         .frame(maxHeight: 400)
+                        .popupSurface()
                     }
                 }
 

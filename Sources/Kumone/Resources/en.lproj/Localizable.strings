@@ -629,7 +629,6 @@
 "关闭音效" = "Off";
 "智能音效" = "智能音效";
 "情绪调音师" = "情绪调音师";
-"（本地）" = " (Local)";
 "音效列表" = "Effects";
 "预设音效" = "Preset";
 "选择音效" = "Choose an effect";
@@ -701,12 +700,6 @@
 
 /* Sound effect panel */
 "启用音效" = "Enable effects";
-"开启后使用：" = "When enabled: ";
-"选择下方可用音效以开启" = "Choose an available effect below to enable it";
-"采用官方音效数据，由 Liltiva 本地处理，听感可能与官方客户端有差异。" = "Uses official effect data, processed locally by Liltiva. Sound may differ from the official client.";
-"随歌曲自动匹配音效" = "Automatically matches effects to each song";
-"根据歌曲情绪调音" = "Tunes the sound to each song’s mood";
-"为每首歌匹配调音，按偏好调整" = "Per-song tuning, shaped by your preferences";
 "已展开" = "Expanded";
 "已收起" = "Collapsed";
 "默认" = "Default";

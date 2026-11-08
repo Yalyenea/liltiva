@@ -216,8 +216,7 @@ struct NavigationMenuButton: View {
         .accessibilityLabel("更多")
         .popover(isPresented: $showMore, arrowEdge: .bottom) {
             MorePanel(selection: $selection)
-                .noFocusRing()
-                .presentationBackground(Platform.windowBackgroundColor)
+                .popupSurface()
         }
     }
 }
@@ -286,10 +285,8 @@ private struct MorePanelRow: View {
         .buttonStyle(.plain)
         .noFocusRing()
         .padding(.trailing, 4)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-                .fill(.primary.opacity(isSelected ? 0.1 : (isHovering ? 0.06 : 0)))
-        )
+        .background(PopupRowBackground(isSelected: isSelected, isHighlighted: isHovering))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         .onHover { isHovering = $0 }
     }
 }
@@ -426,8 +423,7 @@ struct AccountAvatarButton: View {
         }
         .popover(isPresented: $showPopover, arrowEdge: .bottom) {
             accountCard
-                .noFocusRing()
-                .presentationBackground(Platform.windowBackgroundColor)
+                .popupSurface()
         }
     }
 
@@ -470,41 +466,34 @@ struct AccountAvatarButton: View {
                     }
                 }
                 Divider().opacity(0.4)
-                Button {
+                PopupRow(action: {
                     showPopover = false
                     onProfile(profile.userId)
-                } label: {
+                }) {
                     Label("个人主页", systemImage: "person.crop.circle")
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
-                }.buttonStyle(.plain)
-                Button {
+                }
+                PopupRow(action: {
                     showPopover = false
                     onMessages()
-                } label: {
+                }) {
                     HStack {
                         Label("消息中心", systemImage: "bell")
                         Spacer()
                         if messages.unread > 0 { UnreadCountBadge(count: messages.unread) }
-                    }.padding(.vertical, 4).contentShape(Rectangle())
-                }.buttonStyle(.plain)
+                    }
+                }
                 Divider().opacity(0.4)
-                Button {
+                PopupRow(action: {
                     Task {
                         do {
                             try await account.logout()
                             showPopover = false
                         } catch { ToastCenter.shared.show(error.localizedDescription) }
                     }
-                } label: {
-                    Text("退出登录")
-                        .font(.system(size: 12.5, weight: .medium))
+                }) {
+                    Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right")
                         .foregroundStyle(Theme.accent)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 7)
-                        .background(Theme.accent.opacity(0.1), in: Capsule())
-                        .contentShape(Capsule())
                 }
-                .buttonStyle(.pressable)
             } else {
                 Text("登录后同步你的音乐")
                     .font(.headline)
@@ -516,19 +505,15 @@ struct AccountAvatarButton: View {
                 .buttonStyle(.borderedProminent)
             }
             Divider()
-            Button {
+            PopupRow(action: {
                 showPopover = false
                 openSettings()
-            } label: {
+            }) {
                 Label("设置", systemImage: "gearshape")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 4)
             }
-            .buttonStyle(.plain)
-            .noFocusRing()
         }
-        .padding(16)
-        .frame(width: 220)
+        .padding(8)
+        .frame(width: 230)
         .noFocusRing()
     }
 }

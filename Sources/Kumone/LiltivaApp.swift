@@ -156,6 +156,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Deliver recording input before playback shortcuts or menu key equivalents consume it.
     @MainActor
     static func interceptKeyEvent(_ event: NSEvent) -> NSEvent? {
+        // Let the frontmost popup own arrows, Space and Escape; otherwise the
+        // playback shortcuts can act on the page underneath its controls.
+        if PopupPresentation.isPresented { return event }
         if let recorder = event.window?.firstResponder as? ShortcutRecorderView.RecorderNSView {
             recorder.keyDown(with: event)
             return nil

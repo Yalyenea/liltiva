@@ -8,6 +8,12 @@ struct NowPlayingView: View {
     @EnvironmentObject private var settings: SettingsManager
     @EnvironmentObject private var artworkStore: NowPlayingArtworkStore
     @EnvironmentObject private var nowPlayingIdle: NowPlayingIdleController
+    @State private var highlightedOption: PlaybackOption?
+
+    private enum PlaybackOption: Hashable {
+        case mode(NowPlayingMode)
+        case transparency
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -79,28 +85,17 @@ struct NowPlayingView: View {
         HStack(spacing: 4) {
             Spacer()
           HStack(spacing: 4) {
-            Menu {
-                Picker("播放页模式", selection: $settings.nowPlayingMode) {
-                    ForEach(NowPlayingMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.inline)
-                .labelsHidden()
-                Divider()
-                Toggle("透明模式", isOn: $settings.transparentPlayback)
-                if settings.transparentPlayback {
-                    Button("背景透明度…") { nowPlayingIdle.isShowingOptions = true }
-                }
+            Button {
+                nowPlayingIdle.isShowingOptions.toggle()
             } label: {
                 headerGlyph("rectangle.on.rectangle")
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .tint(.white.opacity(0.85))
+            .buttonStyle(.plain)
+            .noFocusRing()
             .fixedSize()
-            .popover(isPresented: $nowPlayingIdle.isShowingOptions, arrowEdge: .top) {
-                transparencyOptions
+            .popover(isPresented: $nowPlayingIdle.isShowingOptions, arrowEdge: .bottom) {
+                playbackOptions
+                    .popupSurface()
             }
             .help("播放页设置")
             .accessibilityLabel("播放页设置")
@@ -115,6 +110,49 @@ struct NowPlayingView: View {
         }
         .padding(.trailing, 16)
         .frame(height: Theme.Layout.titlebarHeight)
+    }
+
+    private var playbackOptions: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(NowPlayingMode.allCases) { mode in
+                PopupRow(isSelected: settings.nowPlayingMode == mode,
+                         isHighlighted: highlightedOption == .mode(mode),
+                         onHover: { if $0 { highlightedOption = .mode(mode) } },
+                         action: { selectOption(.mode(mode)) }) {
+                    Text(mode.displayName)
+                }
+            }
+            Divider().padding(.vertical, 4)
+            Toggle("透明模式", isOn: $settings.transparentPlayback)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(.system(size: 13))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(PopupRowBackground(isHighlighted: highlightedOption == .transparency))
+                .onHover { if $0 { highlightedOption = .transparency } }
+            if settings.transparentPlayback {
+                transparencyOptions
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+            }
+        }
+        .padding(8)
+        .frame(width: 246)
+        .popupKeyboardNavigation(items: NowPlayingMode.allCases.map(PlaybackOption.mode) + [.transparency],
+                                 selection: .mode(settings.nowPlayingMode), highlighted: $highlightedOption,
+                                 onSelect: selectOption,
+                                 onDismiss: { nowPlayingIdle.isShowingOptions = false })
+    }
+
+    private func selectOption(_ option: PlaybackOption) {
+        switch option {
+        case .mode(let mode):
+            settings.nowPlayingMode = mode
+            nowPlayingIdle.isShowingOptions = false
+        case .transparency:
+            settings.transparentPlayback.toggle()
+        }
     }
 
     private var transparencyOptions: some View {
@@ -141,8 +179,6 @@ struct NowPlayingView: View {
         }
         .font(.system(size: 12))
         .controlSize(.small)
-        .frame(width: 220)
-        .padding(12)
     }
 
     // MARK: - Backdrop

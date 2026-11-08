@@ -19,8 +19,7 @@ struct EmotionSoundAnalysis: Codable, Equatable, Sendable {
         }
     }
 
-    /// A local, deliberately modest tuning rule. These coefficients do not
-    /// reproduce NetEase's native emotion model: the interface says "本地".
+    /// A local tuning rule based on the official song analysis.
     /// Calm songs get softer highs and space; energetic songs retain attack.
     func localEffect() throws -> AISoundEffect {
         try validate()

@@ -9,7 +9,7 @@ enum SoundEffectMode: String, Codable, CaseIterable, Identifiable {
         case .off: return String(localized: "关闭音效")
         case .aiMaster: return "AI调音大师"
         case .smart: return "智能音效"
-        case .emotion: return "情绪调音师" + String(localized: "（本地）")
+        case .emotion: return "情绪调音师"
         case .preset: return String(localized: "音效列表")
         }
     }

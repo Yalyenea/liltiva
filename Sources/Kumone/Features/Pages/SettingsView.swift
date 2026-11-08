@@ -101,15 +101,10 @@ struct SettingsView: View {
 
     private var categoryHeader: some View {
         HStack {
-            Picker("设置分类", selection: $category) {
-                ForEach(SettingsCategory.allCases) { item in
-                    Label(item.title, systemImage: item.icon).tag(item)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
-            .accessibilityLabel("设置分类")
+            SettingsChoiceButton(title: String(localized: "设置分类"), selection: $category,
+                                 options: SettingsCategory.allCases.map {
+                                     .init(value: $0, title: $0.title, symbol: $0.icon)
+                                 }, width: 128)
             Spacer()
         }
         .padding(.horizontal, 24)

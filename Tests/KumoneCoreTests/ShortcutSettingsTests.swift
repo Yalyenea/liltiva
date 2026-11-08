@@ -6,6 +6,28 @@ import Testing
 
 @Suite @MainActor
 struct ShortcutSettingsTests {
+    @Test func popupReceivesKeysBeforePlaybackShortcuts() throws {
+        let player = PlayerService.shared
+        let originalPanel = player.activePanel
+        let originalPage = player.showNowPlaying
+        let id = UUID()
+        PopupPresentation.activeIDs.insert(id)
+        defer {
+            PopupPresentation.activeIDs.remove(id)
+            player.activePanel = originalPanel
+            player.showNowPlaying = originalPage
+        }
+        player.activePanel = .queue
+        player.showNowPlaying = true
+
+        for (code, key) in [(UInt16(53), "\u{1B}"), (49, " "), (125, "\u{F701}"), (36, "\r")] {
+            let event = try keyEvent(code: code, key: key)
+            #expect(AppDelegate.interceptKeyEvent(event) === event)
+            #expect(player.activePanel == .queue)
+            #expect(player.showNowPlaying)
+        }
+    }
+
     @Test func escapeLeavesSearchBeforeClosingThePlaybackPanel() throws {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 100),
                               styleMask: [.titled], backing: .buffered, defer: false)

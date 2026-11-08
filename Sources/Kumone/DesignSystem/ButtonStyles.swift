@@ -120,7 +120,7 @@ private struct ControlHintModifier: ViewModifier {
                         .foregroundStyle(.primary)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 6)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .panelSurface(in: RoundedRectangle(cornerRadius: Theme.Radius.small))
                         .fixedSize()
                         // Leave room for the progress lane above the controls.
                         .offset(y: -50)

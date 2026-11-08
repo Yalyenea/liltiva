@@ -166,7 +166,6 @@ struct EmotionSoundEffectTests {
         #expect(calm.aev2["cmp"].enabled)
         try calm.validate()
         try lively.validate()
-        #expect(SoundEffectMode.emotion.title.contains("本地"))
         #expect(SoundEffectMode.emotion.minimumMembership == .svip)
     }
     @Test func malformedAnalysisIsRejected() {

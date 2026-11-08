@@ -8,6 +8,8 @@ struct PlayerBar: View {
     @ObservedObject private var shortcuts = ShortcutManager.shared
     @Environment(\.openLogin) private var openLogin
     @State private var showsSoundEffects = false
+    @State private var soundEffectsHeight: CGFloat = 440
+    @State private var showsQuality = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -168,25 +170,8 @@ struct PlayerBar: View {
 
     private func qualityMenu(showsTitle: Bool, diameter: CGFloat) -> some View {
         let currentQuality = player.servedQuality.flatMap(AudioQuality.init) ?? account.playbackQuality
-        return Menu {
-            Picker("播放音质", selection: Binding(
-                get: { account.playbackQuality },
-                set: { player.setAudioQuality($0) }
-            )) {
-                ForEach(account.availableAudioQualities) { quality in
-                    Text(quality.displayName).tag(quality)
-                }
-            }
-            .pickerStyle(.inline)
-            Divider()
-            Text(account.membershipTier.displayName)
-            if account.membershipRefreshFailed {
-                Button("重试会员信息") { Task { await account.refreshMembership() } }
-            }
-            if let level = player.servedQuality, let quality = AudioQuality(rawValue: level) {
-                Divider()
-                Text("当前音质：\(quality.displayName)")
-            }
+        return Button {
+            showsQuality.toggle()
         } label: {
             Group {
                 if showsTitle {
@@ -200,9 +185,13 @@ struct PlayerBar: View {
             .frame(height: diameter)
             .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
+        .noFocusRing()
         .fixedSize()
+        .popover(isPresented: $showsQuality, arrowEdge: .top) {
+            AudioQualityPanel { showsQuality = false }
+                .popupSurface()
+        }
         .controlHint(currentQuality.displayName)
         .accessibilityLabel("播放音质")
         .accessibilityValue(currentQuality.displayName)
@@ -228,9 +217,77 @@ struct PlayerBar: View {
                 SoundEffectPanel(onLogin: {
                     showsSoundEffects = false
                     openLogin()
-                }).padding(20)
+                })
+                .padding(8)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { soundEffectsHeight = $0 }
             }
-            .frame(width: 390, height: 530)
+            // Short catalogs fit their content; long catalogs and expanded
+            // preferences scroll within the same compact popup.
+            .frame(width: 360, height: min(soundEffectsHeight, 440))
+            .popupSurface()
+        }
+    }
+}
+
+private struct AudioQualityPanel: View {
+    let dismiss: () -> Void
+    @EnvironmentObject private var player: PlayerService
+    @EnvironmentObject private var account: AccountStore
+    @State private var highlighted: Row?
+
+    private enum Row: Hashable {
+        case quality(AudioQuality)
+        case retry
+    }
+
+    private var rows: [Row] {
+        account.availableAudioQualities.map(Row.quality)
+            + (account.membershipRefreshFailed ? [.retry] : [])
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(account.availableAudioQualities) { quality in
+                PopupRow(isSelected: account.playbackQuality == quality,
+                         isHighlighted: highlighted == .quality(quality),
+                         onHover: { if $0 { highlighted = .quality(quality) } },
+                         action: { select(.quality(quality)) }) {
+                    Text(quality.displayName)
+                }
+            }
+            Divider().padding(.vertical, 4)
+            Text(account.membershipTier.displayName)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+            if account.membershipRefreshFailed {
+                PopupRow(isHighlighted: highlighted == .retry,
+                         onHover: { if $0 { highlighted = .retry } },
+                         action: { select(.retry) }) {
+                    Text("重试会员信息")
+                }
+            }
+            if let level = player.servedQuality, let quality = AudioQuality(rawValue: level) {
+                Text("当前音质：\(quality.displayName)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+            }
+        }
+        .padding(8)
+        .frame(width: 230)
+        .popupKeyboardNavigation(items: rows,
+                                 selection: .quality(account.playbackQuality), highlighted: $highlighted,
+                                 onSelect: select, onDismiss: dismiss)
+    }
+
+    private func select(_ row: Row) {
+        dismiss()
+        switch row {
+        case .quality(let quality): player.setAudioQuality(quality)
+        case .retry: Task { await account.refreshMembership() }
         }
     }
 }
@@ -452,7 +509,7 @@ struct ScrubberLane: View {
                         .fixedSize()
                         .padding(.horizontal, 8)
                         .frame(height: 26)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .panelSurface(in: RoundedRectangle(cornerRadius: Theme.Radius.small))
                         .visualEffect { content, layout in
                             let previewWidth = layout.size.width
                             // Keep the fitted label centred on the pointer and inside the lane.
@@ -560,7 +617,7 @@ struct VolumeControl: View {
         }
         .frame(width: diameter, height: 96)
         .padding(.vertical, 4)
-        .background(.regularMaterial, in: Capsule())
+        .panelSurface(in: RoundedRectangle(cornerRadius: Theme.Radius.small))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("音量")
         .accessibilityValue("\(Int(player.volume * 100))%")

@@ -32,18 +32,23 @@ struct SoundEffectPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 10) {
             header
-            status
-            aiMasterCard
-            VStack(spacing: 8) {
-                modeCard(.smart, icon: "waveform", subtitle: "随歌曲自动匹配音效")
-                modeCard(.emotion, icon: "sparkles", subtitle: "根据歌曲情绪调音")
+            if !signedIn || (enabled && ![.off, .waiting, .ready].contains(player.soundEffectState)) {
+                status
             }
-            presetCatalog
-            Text("采用官方音效数据，由 Liltiva 本地处理，听感可能与官方客户端有差异。")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 2) {
+                modeRow(.aiMaster, icon: "wand.and.stars")
+                if settings.soundEffectMode == .aiMaster {
+                    tuningPreferences
+                }
+                modeRow(.smart, icon: "waveform")
+                modeRow(.emotion, icon: "sparkles")
+            }
+            if signedIn {
+                Divider()
+                presetCatalog
+            }
         }
         .font(.system(size: 13))
         .tint(Theme.accent)
@@ -55,14 +60,14 @@ struct SoundEffectPanel: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("音效").font(.system(size: 20, weight: .semibold))
-                Text(enabled ? player.selectedSoundEffectName : String(localized: "音效已关闭"))
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                    .lineLimit(2)
+        HStack(spacing: 8) {
+            Text("音效").font(.system(size: 14, weight: .semibold))
+            if enabled {
+                Text(player.selectedSoundEffectName)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: 0)
             Toggle("启用音效", isOn: Binding(get: { enabled }, set: { active in
                 if active, let mode = resumeMode { player.setSoundEffectMode(mode) }
                 else if !active { player.setSoundEffectMode(.off) }
@@ -70,8 +75,10 @@ struct SoundEffectPanel: View {
             .labelsHidden().toggleStyle(.switch).controlSize(.small)
             .disabled(!enabled && !canResume)
             .accessibilityIdentifier("sound-effect-toggle")
-            .help(enabled || canResume ? String(localized: "启用音效") : String(localized: "选择下方可用音效以开启"))
+            .help("启用音效")
         }
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
     }
 
     private var status: some View {
@@ -83,12 +90,9 @@ struct SoundEffectPanel: View {
                     .foregroundStyle(player.soundEffectState == .ready && enabled ? Theme.accent : .secondary)
                     .frame(width: 15, height: 15)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(statusText).font(.system(size: 12))
-                if enabled, let emotion = player.soundEffectEmotionLabel, !emotion.isEmpty {
-                    Text(emotion).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-            }
+            Text(signedIn ? player.soundEffectState.displayName : String(localized: "登录后可使用音效"))
+                .font(.system(size: 11))
+                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
             if !signedIn, let onLogin {
                 Button("登录", action: onLogin).buttonStyle(.borderless).font(.system(size: 12))
@@ -97,29 +101,17 @@ struct SoundEffectPanel: View {
                     .buttonStyle(.borderless).font(.system(size: 12))
             }
         }
-        .padding(10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("sound-effect-status")
-    }
-
-    private var statusText: String {
-        guard signedIn else { return String(localized: "登录后可使用音效") }
-        if enabled { return player.soundEffectState.displayName }
-        if canResume, let mode = resumeMode {
-            let name = mode == .preset
-                ? player.soundEffectPresets.first(where: { $0.id == settings.soundEffectPresetID })?.name ?? mode.title
-                : mode.title
-            return String(localized: "开启后使用：") + name
-        }
-        return String(localized: "选择下方可用音效以开启")
     }
 
     private var statusIcon: String {
         guard enabled else { return "info.circle" }
         switch player.soundEffectState {
-        case .ready: return "checkmark.circle.fill"
+        case .ready: return "waveform.circle.fill"
         case .requiresLogin, .requiresSVIP, .unauthorized: return "lock"
         case .offlineMissing: return "wifi.slash"
         case .failed, .unavailable, .unsupportedSource: return "exclamationmark.circle"
@@ -127,30 +119,29 @@ struct SoundEffectPanel: View {
         }
     }
 
-    private var aiMasterCard: some View {
+    private var tuningPreferences: some View {
         VStack(alignment: .leading, spacing: 0) {
-            modeButton(.aiMaster, icon: "wand.and.stars", subtitle: "为每首歌匹配调音，按偏好调整")
-            if settings.soundEffectMode == .aiMaster {
-                Divider().padding(.horizontal, 12)
-                Button {
-                    withAnimation(AppAnimation.quick) { showsPreferences.toggle() }
-                } label: {
-                    HStack {
-                        Text("个性偏好")
-                        Spacer()
-                        Text(preferenceSummary).font(.system(size: 11)).foregroundStyle(.secondary)
-                        Image(systemName: showsPreferences ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                    }
-                    .padding(12).contentShape(Rectangle())
+            Button {
+                withAnimation(AppAnimation.quick) { showsPreferences.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Text("个性偏好")
+                    Spacer()
+                    Text(preferenceSummary).foregroundStyle(.secondary)
+                    Image(systemName: showsPreferences ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("sound-effect-preferences")
-                .accessibilityValue(showsPreferences ? String(localized: "已展开") : String(localized: "已收起"))
-                if showsPreferences { preferences.padding(.horizontal, 12).padding(.bottom, 12) }
+                .font(.system(size: 11))
+                .padding(.leading, 38)
+                .padding(.trailing, 10)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.interactiveRow)
+            .accessibilityIdentifier("sound-effect-preferences")
+            .accessibilityValue(showsPreferences ? String(localized: "已展开") : String(localized: "已收起"))
+            if showsPreferences { preferences.padding(.horizontal, 10).padding(.vertical, 6) }
         }
-        .background(cardBackground(settings.soundEffectMode == .aiMaster))
     }
 
     private var preferenceSummary: String {
@@ -159,22 +150,27 @@ struct SoundEffectPanel: View {
     }
 
     private var preferences: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Text("调音强度").font(.system(size: 12))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("调音强度").font(.system(size: 11))
                 Slider(value: Binding(get: { settings.aiSoundEffectStrength }, set: player.setAISoundEffectStrength),
                        in: 0...1, step: 0.05)
                     .accessibilityLabel("调音强度")
                 Text(settings.aiSoundEffectStrength, format: .percent.precision(.fractionLength(0)))
                     .font(.system(size: 11)).monospacedDigit().frame(width: 34, alignment: .trailing)
             }
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 4), GridItem(.flexible())],
+                      alignment: .leading, spacing: 2) {
                 ForEach(AITuningPreference.allCases) { preference in
-                    Toggle(preference.title, isOn: Binding(
-                        get: { settings.aiTuningPreferences.contains(preference) },
-                        set: { player.setAITuningPreference(preference, enabled: $0) }
-                    ))
-                    .toggleStyle(.checkbox).font(.system(size: 12))
+                    let selected = settings.aiTuningPreferences.contains(preference)
+                    PopupRow(isSelected: selected) {
+                        player.setAITuningPreference(preference, enabled: !selected)
+                    } content: {
+                        Text(preference.title)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .accessibilityLabel(preference.title)
+                    .accessibilityValue(selected ? String(localized: "已选择") : String(localized: "未选择"))
                 }
             }
             // The service reports preferences rejected for this song; keep the
@@ -193,43 +189,31 @@ struct SoundEffectPanel: View {
         .disabled(!signedIn || account.membershipTier < .svip)
     }
 
-    private func modeCard(_ mode: SoundEffectMode, icon: String, subtitle: LocalizedStringKey) -> some View {
-        modeButton(mode, icon: icon, subtitle: subtitle)
-            .background(cardBackground(settings.soundEffectMode == mode))
-    }
-
-    private func modeButton(_ mode: SoundEffectMode, icon: String, subtitle: LocalizedStringKey) -> some View {
+    private func modeRow(_ mode: SoundEffectMode, icon: String) -> some View {
         let allowed = signedIn && account.membershipTier >= mode.minimumMembership
         let selected = settings.soundEffectMode == mode
-        return Button { player.setSoundEffectMode(mode) } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon).font(.system(size: mode == .aiMaster ? 23 : 18, weight: .medium))
-                    .foregroundStyle(selected ? Theme.accent : .primary.opacity(0.7))
-                    .frame(width: 32)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(mode.title).font(.system(size: 13, weight: .semibold))
-                        Text(mode.minimumMembership.displayName)
-                            .font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
-                            .padding(.horizontal, 5).padding(.vertical, 2)
-                            .background(.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 3))
-                    }
-                    Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        return PopupRow(isSelected: selected, action: { player.setSoundEffectMode(mode) }) {
+            HStack(spacing: 10) {
+                Image(systemName: icon).font(.system(size: 14))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 18)
+                Text(mode.title)
                 Spacer(minLength: 0)
-                Image(systemName: selected ? "checkmark.circle.fill" : allowed ? "circle" : "lock")
-                    .font(.system(size: 16)).foregroundStyle(selected ? Theme.accent : .secondary.opacity(0.6))
+                Text(mode.minimumMembership.displayName)
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                if !allowed {
+                    Image(systemName: "lock")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
             }
-            .padding(12).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).disabled(!allowed)
+        .disabled(!allowed)
         .accessibilityLabel(mode.title + "，" + mode.minimumMembership.displayName)
         .accessibilityValue(selected ? String(localized: "已选择") : allowed ? String(localized: "可用") : String(localized: "暂无权益"))
     }
 
     private var presetCatalog: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("音效列表").font(.system(size: 12, weight: .semibold))
                 Spacer()
@@ -244,20 +228,21 @@ struct SoundEffectPanel: View {
                     }
                 }
             }
-            if !signedIn {
-                Text("登录后查看可用音效").font(.system(size: 12)).foregroundStyle(.secondary)
-            } else if player.soundEffectPresets.isEmpty {
+            .padding(.horizontal, 10)
+            if signedIn && player.soundEffectPresets.isEmpty {
                 Text(player.soundEffectCatalogLoading ? String(localized: "正在加载音效…")
                      : player.soundEffectCatalogFailed ? String(localized: "音效列表加载失败，请重试")
                      : String(localized: "暂无可用音效"))
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
                     .fixedSize(horizontal: false, vertical: true)
-            } else {
+            } else if signedIn {
                 if player.soundEffectCatalogFailed {
-                    Text("音效列表更新失败，当前显示已加载的音效")
+                    Text("音效列表加载失败，请重试")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 4)], spacing: 2) {
                     ForEach(player.soundEffectPresets) { preset in presetCard(preset) }
                 }
             }
@@ -268,35 +253,44 @@ struct SoundEffectPanel: View {
         let selected = settings.soundEffectMode == .preset && settings.soundEffectPresetID == preset.id
         let allowed = signedIn && preset.canUse(tier: account.membershipTier)
         return Button { player.selectSoundEffectPreset(preset) } label: {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack {
-                    Image(systemName: selected ? "checkmark.circle.fill" : "waveform.path")
-                        .foregroundStyle(selected ? Theme.accent : .secondary)
-                    Spacer(minLength: 0)
-                    if !allowed { Image(systemName: "lock").font(.system(size: 10)).foregroundStyle(.secondary) }
-                }
-                Text(preset.name).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                    .frame(maxWidth: .infinity, minHeight: 30, alignment: .topLeading)
-                Text(preset.membership == .free ? String(localized: "免费") : preset.membership.displayName)
+            HStack(spacing: 6) {
+                Text(preset.name).font(.system(size: 12)).lineLimit(1)
+                Spacer(minLength: 0)
+                if preset.membership != .free {
+                    Text(preset.membership.displayName)
                     .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                if !allowed { Image(systemName: "lock").font(.system(size: 10)).foregroundStyle(.secondary) }
             }
-            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain).disabled(!allowed)
-        .background(cardBackground(selected))
+        .buttonStyle(.plain)
+        .modifier(SoundEffectRowBackground(isSelected: selected))
+        .disabled(!allowed)
+        .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityLabel(preset.name + "，" + preset.membership.displayName)
         .accessibilityValue(selected ? String(localized: "已选择") : allowed ? String(localized: "可用") : String(localized: "暂无权益"))
-    }
-
-    private func cardBackground(_ selected: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 8)
-            .fill(selected ? Theme.accent.opacity(0.055) : .primary.opacity(0.025))
-            .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(selected ? Theme.accent.opacity(0.55) : .primary.opacity(0.09), lineWidth: 1) }
+        .help(preset.name)
     }
 
     private func rememberSelection(_ mode: SoundEffectMode) {
         if mode != .off { lastEnabledMode = mode.rawValue }
+    }
+}
+
+/// Keep the richer sound effect layouts on the same selection and hover surface as menu rows.
+private struct SoundEffectRowBackground: ViewModifier {
+    let isSelected: Bool
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHighlighted = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(PopupRowBackground(isSelected: isSelected,
+                                           isHighlighted: isEnabled && isHighlighted))
+            .onHover { isHighlighted = $0 }
     }
 }
 
